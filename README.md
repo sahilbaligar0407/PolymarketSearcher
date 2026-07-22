@@ -1,60 +1,118 @@
 # PolymarketSearcher
 
-Collects the **open positions of the top ~100 Polymarket performers** into one mega
-document, plus a cross-trader "what do the top performers hold in common" table for
-basket-copy analysis. Pure public API, **no browser, no login, zero dependencies.**
+Tracks the **open positions of the top ~100 Polymarket performers**, finds what the
+smart money agrees on, and — given a bankroll — generates an AI **spread of trades**
+(which market, which side, how much) validated against live web search.
 
-## Run it
+Pure public API, **no browser, no login, zero npm dependencies.** Runs on Node 18+
+(tested on Node 24). Includes a command-center dashboard inspired by
+[worldmonitor](https://github.com/koala73/worldmonitor).
 
-Requires Node 18+ (tested on Node 24). No `npm install` needed.
+---
+
+## Two ways to use it
+
+### 1. The dashboard (recommended)
 
 ```powershell
-node collect.js
+node server.js
 ```
 
-or `npm start`, or double-click `run.bat`.
+Then open **http://localhost:5173**. You get:
 
-Takes ~10–15 seconds. Writes three dated files into `output/`:
+- **KPI strip** — tracked traders, aggregate capital, unrealized PnL, consensus signals.
+- **AI Budget Allocator** — enter a bankroll + risk profile, hit *Generate Spread*, and
+  get a diversified set of trades (market, side, stake, shares, ROI-if-win, rationale),
+  an **analyst briefing**, and per-pick **web validation** headlines.
+- **Consensus Signal** — the markets/outcomes the most top traders share (the basket-copy signal).
+- **Top Performers** — the ranked pool with portfolio value + PnL.
+- **↻ Refresh Data** — re-runs the collector against Polymarket live.
+
+### 2. The collector (CLI, produces documents)
+
+```powershell
+node collect.js       # or: npm run collect
+```
+
+Writes three dated files to `output/` (upload the `.md` or `.json` to ChatGPT):
 
 | File | What it is |
 |------|-----------|
-| `top100_positions_<date>.md`   | Human-readable mega doc — every top performer with their open positions in the format `Outcome ¢ · shares · avg→cur · $value · PnL`. Upload this (or the JSON) to ChatGPT. |
-| `top100_positions_<date>.json` | Same data, structured, for programmatic / ChatGPT use. |
-| `common_positions_<date>.md`   | **Basket-copy signal:** markets/outcomes held by ≥2 top performers, ranked by holder count + aggregate value, with per-holder detail. |
+| `top100_positions_<date>.md`   | Human mega-doc — every top performer + open positions. |
+| `top100_positions_<date>.json` | Same, structured, for programmatic/ChatGPT use. |
+| `common_positions_<date>.md`   | Cross-trader commonality table (basket-copy signal). |
 
-## How it works
+The dashboard reads the newest `output/*.json`, so run the collector once first (or use
+the Refresh Data button).
 
-1. **Top-performer pool.** The public leaderboard API (`lb-api.polymarket.com`) hard-caps
-   each board at the top 50 and does **not** support offset/pagination. To reach ~100
-   unique performers we union four boards — Monthly Profit, Monthly Volume, All-time
-   Profit, All-time Volume — deduping by wallet and tagging each trader with every rank
-   they hold. Monthly Profit (the site default) defines the primary ordering.
-2. **Positions.** For each wallet we call the public positions API
-   (`data-api.polymarket.com/positions`), sorted by current value descending, and keep
-   the meaningful **open** positions (unresolved, `0 < price < 1`, value ≥ threshold).
-3. **Render** the three documents above.
+---
+
+## The AI allocator, explained
+
+The numbers are **deterministic** (computed in `lib/analyze.js`) so they're never
+hallucinated; the AI only adds the qualitative layer. For each candidate market held by
+≥2 top traders and still tradeable (price between guard rails), it scores four signals:
+
+- **conviction** — how many top traders hold it
+- **capital** — aggregate smart-money $ committed (log-scaled)
+- **room** — price headroom (peaks at a coin-flip 50¢ — "not yet decided")
+- **momentum** — current price vs. the traders' average entry
+
+Risk profile reweights these (conservative favors conviction + likely favorites;
+aggressive favors headroom/upside). The bankroll is then spread proportionally to score,
+diversified (one pick per event), and capped per trade. Each pick shows stake, shares,
+and ROI-if-win.
+
+### Local AI (optional upgrade)
+
+Works out-of-the-box with a built-in **heuristic** analyst. If you install
+[Ollama](https://ollama.com) and pull a small model, the app auto-detects it at
+`localhost:11434` and upgrades the briefing to real SLM reasoning:
+
+```powershell
+# optional
+ollama pull llama3.2      # or qwen2.5:3b, phi3.5, etc.
+ollama serve
+```
+
+The AI badge in the top bar shows the active engine. Point at a different host with
+`OLLAMA_HOST`.
+
+### Web validation
+
+Each top pick is checked against **DuckDuckGo** (keyless) for corroborating headlines,
+shown inline and fed to the briefing. It's best-effort — DuckDuckGo throttles rapid
+automated requests, so only the top picks are validated (paced), results are cached
+30 min, and picks with no fresh headlines fall back to the trader-consensus rationale.
+Add a real search key later if you want higher reliability.
+
+---
+
+## How the data is built
+
+The public leaderboard API (`lb-api.polymarket.com`) hard-caps each board at the top 50
+and does **not** paginate. To reach ~100 unique top performers we union four boards —
+Monthly Profit, Monthly Volume, All-time Profit, All-time Volume — deduping by wallet.
+Monthly Profit (the site default) defines the primary ordering. Positions come from the
+public `data-api.polymarket.com/positions` endpoint (no auth).
 
 ## Tuning
 
-Edit the `CONFIG` block at the top of `collect.js`:
+Edit `CONFIG` at the top of `collect.js` (`TARGET_USERS`, `BOARDS`, `MIN_POSITION_USD`,
+`MAX_POSITIONS_PER_USER`, `CONCURRENCY`). Allocation knobs (`maxPicks`, `maxPerTradePct`,
+risk weights) live in `lib/analyze.js`.
 
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `TARGET_USERS` | `100` | Size of the performer pool. |
-| `BOARDS` | 4 boards | Which leaderboards to union, and their priority (first = primary rank). Each: `{ metric: 'profit'\|'volume', window: '1d'\|'7d'\|'30d'\|'all', label }`. |
-| `MIN_POSITION_USD` | `50` | Ignore open positions worth less than this. |
-| `MAX_POSITIONS_PER_USER` | `40` | Keep at most this many (largest) per user. |
-| `CONCURRENCY` | `6` | Parallel position requests. |
+## Layout
 
-### Want strictly "Monthly Profit only"?
+```
+collect.js          CLI collector -> output/ documents
+server.js           dashboard server (http://localhost:5173)
+lib/analyze.js      consensus aggregation + scoring + allocation (pure)
+lib/ai.js           Ollama auto-detect + analyst briefing (heuristic fallback)
+lib/websearch.js    keyless DuckDuckGo validation
+public/             dashboard UI (index.html, styles.css, app.js)
+```
 
-Set `BOARDS` to just `[{ metric: 'profit', window: '30d', label: 'Monthly Profit' }]`.
-You'll get the true top **50** by monthly profit (the public API can't return ranks 51–100
-for a single board).
+## Disclaimer
 
-## Notes
-
-- Positions valued near 99–100¢ are effectively settled — the collector still includes them
-  (matching what you see on a profile). Your downstream analysis / ChatGPT step decides which
-  positions still have room to copy.
-- The `output/` folder is git-ignored so runs don't clutter version control.
+For research only. Not financial advice. Copying other traders carries real risk of loss.

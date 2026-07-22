@@ -5,7 +5,9 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "start": "node collect.js"
+    "start": "node server.js",
+    "serve": "node server.js",
+    "collect": "node collect.js"
   },
   "engines": {
     "node": ">=18"

@@ -19,6 +19,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { aggregateCommon } = require('./lib/analyze');
 
 // ------------------------------- CONFIG --------------------------------------
 const CONFIG = {
@@ -241,36 +242,8 @@ function renderMarkdown(users, date) {
 }
 
 function renderCommon(users, date) {
-  // Aggregate identical market+outcome holdings across the pool.
-  const map = new Map();
-  for (const u of users) {
-    for (const p of u.positions) {
-      const key = `${p.conditionId}::${p.outcome}`;
-      if (!map.has(key)) {
-        map.set(key, {
-          title: p.title,
-          outcome: p.outcome,
-          slug: p.slug,
-          holders: [],
-          totalShares: 0,
-          totalValue: 0,
-          curPrice: p.curPrice,
-          endDate: p.endDate,
-          avgPriceSum: 0,
-        });
-      }
-      const e = map.get(key);
-      e.holders.push({ name: u.name, value: p.currentValue, size: p.size, avgPrice: p.avgPrice });
-      e.totalShares += p.size;
-      e.totalValue += p.currentValue;
-      e.avgPriceSum += p.avgPrice;
-      e.curPrice = p.curPrice; // latest
-    }
-  }
-  const rows = [...map.values()]
-    .map((e) => ({ ...e, holderCount: e.holders.length, avgEntry: e.avgPriceSum / e.holders.length }))
-    .filter((e) => e.holderCount >= 2)
-    .sort((a, b) => b.holderCount - a.holderCount || b.totalValue - a.totalValue);
+  // Aggregate identical market+outcome holdings across the pool (shared module).
+  const rows = aggregateCommon(users).filter((e) => e.holderCount >= 2);
 
   const lines = [];
   lines.push(`# Polymarket Top Performers — Common Positions`);
@@ -367,7 +340,11 @@ async function main() {
   console.log(`  ${commonPath}`);
 }
 
-main().catch((err) => {
-  console.error('\nFATAL:', err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('\nFATAL:', err);
+    process.exit(1);
+  });
+}
+
+module.exports = { main, buildUserPool, fetchUserPositions, CONFIG };
