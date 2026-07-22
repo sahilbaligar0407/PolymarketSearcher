@@ -1,0 +1,9 @@
+# Claude Code workspace files
+.claude/
+
+# Node
+node_modules/
+
+# Generated data — keep the folder, ignore its contents
+/output/*
+!/output/.gitkeep
