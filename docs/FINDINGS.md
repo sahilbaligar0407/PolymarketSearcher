@@ -231,3 +231,17 @@ successful ingest.
 The GDELT adapter was constructed with the wrong keyword and the failure was rendered in
 `doctor` as a missing feature rather than a bug. Construction errors are now recorded and
 surfaced verbatim.
+
+**33. Unthrottled forecast recording would have filled the disk in days.**
+Every strategy emits a `ProbabilityForecast` per subscribed market per 1s tick. Across ~400
+sleeves that measured at **623,000 rows in nine minutes — 358 MB of SQLite, projecting ~90M
+rows and tens of gigabytes per day.** The run would have died of disk exhaustion long
+before any strategy accumulated a statistically meaningful sample.
+
+Recording is now throttled per (experiment, market): a forecast is kept when at least 60s
+have passed **or** the probability moved by >=0.01. Calibration needs a representative
+sample of forecasts, not every redundant restatement of an unchanged number, and every
+genuine move is still captured.
+
+Measured after the fix: 9 MB and ~1.56M rows/day — a 40x reduction in size and 57x in row
+count, with fill behaviour unchanged.

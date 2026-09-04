@@ -94,6 +94,15 @@ _INACTIVE_STATUSES = frozenset({ExperimentStatus.DEAD, ExperimentStatus.DISABLED
 #: Buffer this many forecasts before committing them in one transaction.
 _FORECAST_FLUSH_THRESHOLD = 500
 
+#: Forecast recording is throttled per (experiment, market). Left unthrottled, the
+#: baseline strategy alone emits one forecast per subscribed market per 1s tick across
+#: ~400 sleeves - measured at 623k rows in nine minutes, projecting ~90M/day and tens of
+#: gigabytes of SQLite. Calibration needs a representative sample of forecasts, not every
+#: redundant restatement of an unchanged number, so a forecast is kept when either enough
+#: time has passed OR the probability actually moved.
+_FORECAST_MIN_INTERVAL_SECONDS = 60.0
+_FORECAST_MIN_MOVE = Decimal("0.01")
+
 
 @runtime_checkable
 class MarketRegistryLike(Protocol):
@@ -200,6 +209,9 @@ class ExperimentRunner:
         self._construction_failures: dict[str, str] = {}
         #: Forecasts awaiting a batched write. See _flush_forecasts.
         self._forecast_buffer: list[Any] = []
+        #: (experiment_id, canonical_id) -> (last recorded time, last recorded p_yes).
+        self._forecast_last: dict[tuple[str, str], tuple[datetime, Decimal]] = {}
+        self.forecasts_throttled = 0
 
         self.registry = ExperimentRegistry(store, clock)
 
@@ -349,6 +361,26 @@ class ExperimentRunner:
                 status=current_status,
             )
 
+    def _should_record_forecast(self, forecast: Any) -> bool:
+        """Throttle per (experiment, market): keep it if time passed or the number moved.
+
+        Dropping an unchanged restatement loses nothing - the previous row already says
+        the same thing at a slightly earlier instant - while keeping every genuine move,
+        which is what calibration and Brier scoring actually need.
+        """
+        key = (forecast.experiment_id, forecast.canonical_id)
+        previous = self._forecast_last.get(key)
+        now = forecast.as_of
+        if previous is not None:
+            last_time, last_p = previous
+            moved = abs(forecast.p_yes - last_p) >= _FORECAST_MIN_MOVE
+            elapsed = (now - last_time).total_seconds()
+            if not moved and elapsed < _FORECAST_MIN_INTERVAL_SECONDS:
+                self.forecasts_throttled += 1
+                return False
+        self._forecast_last[key] = (now, forecast.p_yes)
+        return True
+
     def _flush_forecasts(self, force: bool = False) -> int:
         """Write buffered forecasts in one transaction.
 
@@ -492,7 +524,9 @@ class ExperimentRunner:
             # Buffered, not written per forecast: a per-row commit here blocked the
             # event loop for minutes once the tournament was emitting tens of thousands
             # of forecasts a minute. Flushed by _flush_forecasts (on tick and snapshot).
-            self._forecast_buffer.extend(sleeve.strategy.drain_forecasts())
+            for forecast in sleeve.strategy.drain_forecasts():
+                if self._should_record_forecast(forecast):
+                    self._forecast_buffer.append(forecast)
 
             for intent in sleeve.strategy.generate_intents():
                 await self._submit_intent(sleeve, intent)
