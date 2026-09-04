@@ -1,0 +1,140 @@
+# Information-source toggles and budgets.
+#
+# Every optional source degrades cleanly: a missing credential produces one WARN and a
+# NO_CREDENTIALS health status. The core engine boots and paper-trades regardless.
+
+sources:
+
+  kalshi:
+    enabled: true
+    required: true          # the execution venue; the engine refuses PAPER without it
+    poll_seconds: 60
+    websocket: true
+
+  polymarket_global:
+    enabled: true
+    required: false
+    execution: false        # hard-wired: read-only intelligence only
+    poll_seconds: 120
+
+  polymarket_us:
+    enabled: true
+    required: false
+    execution: false        # out of scope; Kalshi is the execution venue
+
+  gdelt:
+    enabled: true
+    required: false
+    poll_seconds: 900
+    max_records: 250
+    queries:
+      - prediction market
+      - bitcoin OR cryptocurrency
+      - federal reserve OR interest rates OR inflation
+      - election OR nomination OR congress
+      - hurricane OR heat wave OR winter storm
+
+  sec:
+    enabled: true
+    required: false
+    poll_seconds: 300
+    forms: [8-K, 10-Q, 10-K, "4", 13D, 13G]
+    max_requests_per_second: 8
+
+  crypto_spot:
+    enabled: true
+    required: false
+    primary: coinbase
+    fallback: binance       # geo-restricted from US IPs; disabled cleanly on 451
+    websocket: true
+    poll_seconds: 5
+
+  weather_nws:
+    enabled: true
+    required: false
+    poll_seconds: 1800
+
+  fred:
+    enabled: true
+    required: false
+    poll_seconds: 3600
+    # ALFRED vintages are mandatory: using a revised value in a backtest is look-ahead.
+    point_in_time: true
+
+  alpaca:
+    enabled: true
+    required: false
+    poll_seconds: 60
+
+  sports_odds:
+    enabled: true
+    required: false
+    poll_seconds: 600
+    # Free tier is small; stop calling when the quota header runs low.
+    monthly_request_budget: 450
+    regions: [us]
+    markets: [h2h, spreads, totals]
+
+  x:
+    enabled: true
+    required: false
+    poll_seconds: 300
+    # Usage-priced. Never scrape as a fallback.
+    monthly_request_budget: 1000
+
+  bluesky:
+    enabled: true
+    required: false
+    firehose: true
+    # Public firehose needs no credentials, which makes it the reliable social backbone.
+
+# Public-figure statement tracking. Generic by design; Trump is the first subject.
+public_figures:
+  trump:
+    enabled: true
+    sources: [x, bluesky, gdelt]
+    handles: [realDonaldTrump]
+    keywords:
+      - tariff
+      - china
+      - fed
+      - rates
+      - oil
+      - semiconductor
+      - auto
+      - defense
+      - pharma
+      - crypto
+      - immigration
+      - sanctions
+  powell:
+    enabled: true
+    sources: [gdelt]
+    keywords: [rates, inflation, employment, balance sheet]
+  musk:
+    enabled: true
+    sources: [x, bluesky, gdelt]
+    handles: [elonmusk]
+    keywords: [tesla, spacex, xai, doge, bitcoin]
+
+# Evidentiary weighting. An SEC filing is not a tweet.
+source_classes:
+  official_primary: [sec.gov, federalreserve.gov, bls.gov, weather.gov, nfl.com, nba.com]
+  major_wire: [reuters.com, apnews.com, bloomberg.com, afp.com]
+  major_news: [wsj.com, ft.com, nytimes.com, cnbc.com, washingtonpost.com, bbc.co.uk]
+  specialist: [coindesk.com, theblock.co, politico.com, axios.com]
+  social_verified: []
+  social_unverified: [x.com, bsky.app, reddit.com]
+
+# Licensed political-trade data. Interface only; nothing is ingested by default.
+licensed_political_trades:
+  enabled: false
+  provider: null
+  # Scraping House financial disclosures into an automated money-making strategy is not
+  # permitted: the disclosure site states commercial use is unlawful outside the statutory
+  # exceptions. Both chambers also allow filing up to 45 days after a transaction, so the
+  # data is inherently delayed rather than a real-time trade alert.
+  require_explicit_license: true
+  preserve_transaction_and_publication_dates: true
+  # A disclosure enters a historical test only at the timestamp the public learned of it.
+  backtest_from: publication_date

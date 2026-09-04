@@ -1,0 +1,1322 @@
+"""The ingestion pipeline: every adapter, one event queue.
+
+``IngestService`` owns every venue/data-source adapter and is the only thing in the
+daemon allowed to call them.  Every normalized fact it produces goes two places:
+
+1. the shared :class:`~marketlab.daemon.registry.MarketRegistry` /
+   :class:`~marketlab.daemon.registry.BookRegistry` (so ``marketlab markets`` and the
+   ``PaperBroker``'s ``book_provider``/``market_provider`` see it immediately), and
+2. the single ``asyncio.Queue[Event]`` the :class:`~marketlab.daemon.supervisor.Supervisor`
+   drains to feed the broker and the strategy tournament.
+
+``run_once`` performs exactly one pass of every enabled REST source and returns an
+:class:`IngestOnceResult` with real counts -- this is what ``marketlab ingest --once``
+renders, and per the PRD, zero markets ingested must never look like success (see
+``IngestOnceResult.ok``).  ``start``/``stop`` launch one independently-supervised
+``asyncio.Task`` per source at the cadence configured in ``configs/default.yaml``'s
+``ingest:`` block, so one failing source (a dead websocket, a rate-limited REST host)
+never stops any other.
+
+Every event's ``first_seen_time`` is stamped from the injected :class:`Clock` -- never
+from a venue payload's own timestamp.  That is enforced at the two or three narrow
+choke points below (``_market_update_event`` / ``_book_update_event`` /
+``_trade_event_from_raw``), not by convention.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import os
+import random
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+from marketlab.adapters.base import Adapter, SourceStatus
+from marketlab.adapters.kalshi.normalize import (
+    normalize_market as normalize_kalshi_market,
+)
+from marketlab.adapters.kalshi.normalize import (
+    normalize_orderbook,
+    normalize_settlement,
+    normalize_trade,
+)
+from marketlab.adapters.kalshi.rest import KalshiRestAdapter
+from marketlab.adapters.polymarket_global import geoblock as poly_geoblock
+from marketlab.adapters.polymarket_global.clob import ClobAdapter
+from marketlab.adapters.polymarket_global.data_api import DataApiAdapter
+from marketlab.adapters.polymarket_global.gamma import GammaAdapter
+from marketlab.adapters.polymarket_global.leaderboard import LeaderboardAdapter
+from marketlab.adapters.polymarket_global.normalize import (
+    normalize_book as normalize_poly_book,
+)
+from marketlab.adapters.polymarket_global.normalize import (
+    normalize_market as normalize_poly_market,
+)
+from marketlab.adapters.polymarket_us.public import PolymarketUsAdapter
+from marketlab.clock import Clock
+from marketlab.core.events import (
+    BookUpdateEvent,
+    Event,
+    MarketStatusEvent,
+    MarketUpdateEvent,
+    SettlementEvent,
+    TradeEvent,
+)
+from marketlab.core.instruments import (
+    Category,
+    MarketStatus,
+    NormalizedMarket,
+    OrderBook,
+    Venue,
+)
+from marketlab.logging import get_logger
+from marketlab.settings import CONFIG_DIR, Settings
+from marketlab.storage.state import LeaderboardRow as StoreLeaderboardRow
+
+log = get_logger(__name__)
+
+#: Concurrent Kalshi orderbook fetches. The RateLimiter still governs request rate;
+#: this only stops per-request latency from being serialised across a whole pass.
+_KALSHI_BOOK_CONCURRENCY = 8
+
+
+# ---------------------------------------------------------------------------
+# configs/default.yaml's `ingest:` block is loaded into `settings.py`'s merge dict but
+# never surfaced on the returned Settings object (no declared field, and pydantic drops
+# unknown kwargs by default) -- see the bug note in the module docstring below and the
+# final report. We read it directly here rather than duplicate/patch that module.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_INGEST_CFG: dict[str, Any] = {
+    "kalshi_market_refresh_seconds": 60,
+    "kalshi_book_refresh_seconds": 5,
+    "kalshi_trades_refresh_seconds": 10,
+    "poly_market_refresh_seconds": 120,
+    "poly_book_refresh_seconds": 15,
+    "poly_leaderboard_refresh_seconds": 3600,
+    "poly_activity_refresh_seconds": 30,
+    "gdelt_refresh_seconds": 900,
+    "sec_refresh_seconds": 300,
+    "crypto_spot_refresh_seconds": 5,
+    "weather_refresh_seconds": 1800,
+    "fred_refresh_seconds": 3600,
+    "odds_refresh_seconds": 600,
+    "social_refresh_seconds": 300,
+    "max_tracked_markets": 400,
+    "kalshi_book_sample": 120,
+    "kalshi_broad_sweep_pages": 3,
+    "min_market_volume": 0,
+}
+
+
+def load_raw_config_block(block: str, config_dir: Path | None = None) -> dict[str, Any]:
+    """Reload a top-level block from ``default.yaml``/``<profile>.yaml`` that
+    ``Settings`` does not surface (``ingest``, ``ai``, ``logging``, ...).
+
+    Duplicates ``settings.load_settings``'s tiny YAML-merge exactly (see that module)
+    rather than importing its private helpers, so this keeps working even if that
+    module's internals change shape.
+    """
+    import yaml
+
+    cdir = config_dir or CONFIG_DIR
+
+    def _load_yaml(path: Path) -> dict[str, Any]:
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as fh:
+            return yaml.safe_load(fh) or {}
+
+    def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        out = dict(base)
+        for k, v in override.items():
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = _deep_merge(out[k], v)
+            else:
+                out[k] = v
+        return out
+
+    merged = _load_yaml(cdir / "default.yaml")
+    profile = os.getenv("MARKETLAB_PROFILE", "paper")
+    merged = _deep_merge(merged, _load_yaml(cdir / f"{profile}.yaml"))
+    return dict(merged.get(block) or {})
+
+
+def load_ingest_config(config_dir: Path | None = None) -> dict[str, Any]:
+    cfg = dict(_DEFAULT_INGEST_CFG)
+    cfg.update(load_raw_config_block("ingest", config_dir))
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# Universe expansion (pure functions -- no I/O, fully unit-testable)
+# ---------------------------------------------------------------------------
+
+#: Kalshi's own category labels (configs/universes.yaml `kalshi_series_categories`) ->
+#: the shared Category enum. Table-driven and documented as a judgment call: Kalshi's
+#: 18-category taxonomy (docs/FINDINGS.md #9) is finer than ours.
+KALSHI_CATEGORY_LABEL_MAP: dict[str, Category] = {
+    "crypto": Category.CRYPTO,
+    "sports": Category.SPORTS,
+    "politics": Category.POLITICS,
+    "elections": Category.POLITICS,
+    "economics": Category.ECONOMICS,
+    "financials": Category.FINANCE,
+    "companies": Category.FINANCE,
+    "commodities": Category.FINANCE,
+    "mentions": Category.OTHER,
+    "climate and weather": Category.WEATHER,
+    "science and technology": Category.TECH,
+    "entertainment": Category.ENTERTAINMENT,
+    "world": Category.OTHER,
+    "health": Category.OTHER,
+    "social": Category.OTHER,
+    "transportation": Category.OTHER,
+    "exotics": Category.OTHER,
+    "education": Category.OTHER,
+}
+
+
+def collect_universe_allowlists(
+    universes_cfg: Mapping[str, Any],
+) -> tuple[set[str], set[Category]]:
+    """Every ``kalshi_series`` prefix and ``kalshi_series_categories`` label declared by
+    an ``available: true`` universe, unioned across the whole file."""
+    series: set[str] = set()
+    categories: set[Category] = set()
+    for uni in (universes_cfg.get("universes") or {}).values():
+        if not isinstance(uni, dict) or uni.get("available") is False:
+            continue
+        series.update(str(s).upper() for s in (uni.get("kalshi_series") or []))
+        for label in uni.get("kalshi_series_categories") or []:
+            cat = KALSHI_CATEGORY_LABEL_MAP.get(str(label).strip().lower())
+            if cat is not None:
+                categories.add(cat)
+    return series, categories
+
+
+def select_tracked_markets(
+    markets: Iterable[NormalizedMarket],
+    universes_cfg: Mapping[str, Any] | None,
+    max_tracked_markets: int,
+) -> list[NormalizedMarket]:
+    """Kalshi's ~14k-series catalogue -> the subset a paper-trading run should track.
+
+    Applies (in order): ``exclude_series_prefixes`` (drops the ~12k zero-volume
+    ``KXMVE*`` parlays, docs/FINDINGS.md #8), ``min_volume``/``min_liquidity``,
+    ``require_status``, and universe membership (a market must match a declared
+    ``kalshi_series`` prefix or ``kalshi_series_categories`` label -- unless no universe
+    declares either, in which case every market that survives the filters above is
+    eligible, so a minimal test config doesn't accidentally track nothing). Markets are
+    then ranked by (volume + open_interest) descending, nearest-close-time first, and
+    capped at ``max_tracked_markets``.
+    """
+    cfg = universes_cfg or {}
+    defaults = cfg.get("defaults") or {}
+    exclude_prefixes = tuple(str(p).upper() for p in (defaults.get("exclude_series_prefixes") or []))
+    min_volume = Decimal(str(defaults.get("min_volume", 0)))
+    min_liquidity = Decimal(str(defaults.get("min_liquidity", 0)))
+    require_status = defaults.get("require_status")
+    allowed_series, allowed_categories = collect_universe_allowlists(cfg)
+    has_allowlist = bool(allowed_series or allowed_categories)
+
+    selected: list[NormalizedMarket] = []
+    for m in markets:
+        ticker = m.venue_market_id.upper()
+        series = (m.subcategory or ticker).upper()
+        if any(series.startswith(p) or ticker.startswith(p) for p in exclude_prefixes):
+            continue
+        if require_status and m.status.value != str(require_status):
+            continue
+        if m.volume < min_volume:
+            continue
+        if m.liquidity < min_liquidity:
+            continue
+        if has_allowlist:
+            in_series = any(series.startswith(s) for s in allowed_series)
+            if not in_series and m.category not in allowed_categories:
+                continue
+        selected.append(m)
+
+    def _sort_key(m: NormalizedMarket) -> tuple[Decimal, datetime]:
+        close = m.close_time or datetime.max.replace(tzinfo=UTC)
+        return (-(m.volume + m.open_interest), close)
+
+    selected.sort(key=_sort_key)
+    if max_tracked_markets and max_tracked_markets > 0:
+        selected = selected[:max_tracked_markets]
+    return selected
+
+
+# ---------------------------------------------------------------------------
+# Event construction -- the only place `first_seen_time` is stamped.
+# ---------------------------------------------------------------------------
+
+
+def market_update_event(market: NormalizedMarket, clock: Clock, source: str) -> MarketUpdateEvent:
+    now = clock.now()
+    return MarketUpdateEvent(event_time=now, first_seen_time=now, source=source, market=market)
+
+
+def book_update_event(book: OrderBook, clock: Clock, source: str) -> BookUpdateEvent:
+    """``event_time`` is the book's own timestamp (when the snapshot was taken);
+    ``first_seen_time`` is always this process's clock, never the payload's."""
+    return BookUpdateEvent(event_time=book.timestamp, first_seen_time=clock.now(), source=source, book=book)
+
+
+def trade_event_from_raw(raw: dict[str, Any], clock: Clock, source: str) -> TradeEvent:
+    trade = normalize_trade(raw)
+    return TradeEvent(event_time=trade.timestamp, first_seen_time=clock.now(), source=source, trade=trade)
+
+
+def market_status_event(
+    canonical_id: str, venue: Venue, status: MarketStatus, clock: Clock, source: str
+) -> MarketStatusEvent:
+    now = clock.now()
+    return MarketStatusEvent(
+        event_time=now, first_seen_time=now, source=source, canonical_id=canonical_id, venue=venue, status=status
+    )
+
+
+def settlement_event_from_raw(
+    raw: dict[str, Any], canonical_id: str, venue: Venue, clock: Clock, source: str
+) -> SettlementEvent | None:
+    winning_side, voided = normalize_settlement(raw)
+    if winning_side is None and not voided:
+        return None
+    now = clock.now()
+    return SettlementEvent(
+        event_time=now,
+        first_seen_time=now,
+        source=source,
+        canonical_id=canonical_id,
+        venue=venue,
+        winning_side=winning_side,
+        voided=voided,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parquet row flattening (only for datasets storage/parquet.py actually defines)
+# ---------------------------------------------------------------------------
+
+
+def market_to_parquet_row(market: NormalizedMarket, first_seen: datetime) -> dict[str, Any]:
+    return {
+        "canonical_id": market.canonical_id,
+        "venue": market.venue.value,
+        "venue_market_id": market.venue_market_id,
+        "title": market.title,
+        "category": market.category.value,
+        "status": market.status.value,
+        "open_time": market.open_time,
+        "close_time": market.close_time,
+        "tick_size": market.tick_size,
+        "first_seen_time": first_seen,
+        "date": first_seen.date(),
+    }
+
+
+def book_to_parquet_rows(book: OrderBook) -> list[dict[str, Any]]:
+    """One row per depth level, pairing bid level *i* with ask level *i*."""
+    rows: list[dict[str, Any]] = []
+    depth = max(len(book.bids), len(book.asks))
+    for i in range(depth):
+        bid = book.bids[i] if i < len(book.bids) else None
+        ask = book.asks[i] if i < len(book.asks) else None
+        rows.append(
+            {
+                "canonical_id": book.canonical_id,
+                "venue": book.venue.value,
+                "timestamp": book.timestamp,
+                "venue_timestamp": book.venue_timestamp,
+                "sequence": book.sequence,
+                "side": "both",
+                "level": i,
+                "bid_price": bid.price if bid else None,
+                "ask_price": ask.price if ask else None,
+                "bid_size": bid.size if bid else None,
+                "ask_size": ask.size if ask else None,
+                "date": book.timestamp.date(),
+            }
+        )
+    return rows or [
+        {
+            "canonical_id": book.canonical_id,
+            "venue": book.venue.value,
+            "timestamp": book.timestamp,
+            "venue_timestamp": book.venue_timestamp,
+            "sequence": book.sequence,
+            "side": "both",
+            "level": 0,
+            "bid_price": None,
+            "ask_price": None,
+            "bid_size": None,
+            "ask_size": None,
+            "date": book.timestamp.date(),
+        }
+    ]
+
+
+def trade_to_parquet_row(trade: Any) -> dict[str, Any]:
+    return {
+        "canonical_id": trade.canonical_id,
+        "venue": trade.venue.value,
+        "timestamp": trade.timestamp,
+        "trade_id": trade.trade_id,
+        "aggressor": trade.aggressor.value if trade.aggressor else None,
+        "size": trade.size,
+        "price": trade.price,
+        "date": trade.timestamp.date(),
+    }
+
+
+def trader_action_to_parquet_row(event: Any) -> dict[str, Any]:
+    return {
+        "wallet": event.wallet,
+        "canonical_id": event.canonical_id,
+        "title": event.title,
+        "side": event.side.value if event.side else None,
+        "action": event.action,
+        "price": event.price,
+        "size": event.size,
+        "usd_size": event.usd_size,
+        "category": event.category.value,
+        "event_time": event.event_time,
+        "first_seen_time": event.first_seen_time,
+        "date": event.first_seen_time.date(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Result of a single pass
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class IngestOnceResult:
+    kalshi_markets: int = 0
+    kalshi_books: int = 0
+    kalshi_trades: int = 0
+    poly_markets: int = 0
+    poly_books: int = 0
+    poly_activity: int = 0
+    leaderboard_rows: int = 0
+    geoblock_confirmed: bool | None = None
+    misc: dict[str, int] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def total_markets(self) -> int:
+        return self.kalshi_markets + self.poly_markets
+
+    @property
+    def ok(self) -> bool:
+        """PRD-mandated: zero markets ingested must never present as success."""
+        return self.total_markets > 0
+
+
+# ---------------------------------------------------------------------------
+# Supervised-task helper (used by both IngestService and the Supervisor)
+# ---------------------------------------------------------------------------
+
+
+async def run_supervised(
+    name: str,
+    fn: Callable[[], Awaitable[None]],
+    stop_event: asyncio.Event,
+    clock: Clock,
+    *,
+    health: Any = None,
+    max_backoff: float = 60.0,
+) -> None:
+    """Run ``fn`` forever; if it raises, log, record a reconnect, back off, retry.
+
+    This is the "one failing source must never stop the others" primitive: each
+    per-source loop is wrapped in this, so an unhandled exception inside one adapter's
+    polling coroutine never propagates out of its own ``asyncio.Task``.
+
+    **A normal return ends supervision.** Every real source loop runs
+    ``while not self._stop.is_set()`` internally and only returns when it has opted out -
+    typically an adapter with no credentials returning immediately. Restarting that is a
+    hot loop with no await in it: six unconfigured sources doing this saturated the event
+    loop, starved every other task, and the daemon ran at 100% CPU while processing no
+    events and emitting no heartbeat. Only an *exception* earns a backoff-and-retry.
+    """
+    backoff = 1.0
+    while not stop_event.is_set():
+        try:
+            await fn()
+            log.info(
+                "ingest_task_completed",
+                task=name,
+                detail="loop returned normally; not restarting (source opted out or finished)",
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a supervised loop must never die
+            log.error("ingest_task_failed", task=name, error=str(exc), exc_info=True)
+            if health is not None:
+                health.record_error(name, exc)
+                health.record_reconnect(name)
+            jitter = random.uniform(0, backoff * 0.25)
+            sleep_for = min(backoff + jitter, max_backoff)
+            with contextlib.suppress(asyncio.CancelledError):
+                await clock.sleep(sleep_for)
+            backoff = min(backoff * 2, max_backoff)
+
+
+# ---------------------------------------------------------------------------
+# IngestService
+# ---------------------------------------------------------------------------
+
+
+class IngestService:
+    """Owns every adapter; feeds one ``asyncio.Queue[Event]`` and the shared registries."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        clock: Clock,
+        *,
+        store: Any | None = None,
+        parquet: Any | None = None,
+        health: Any | None = None,
+        market_registry: Any | None = None,
+        book_registry: Any | None = None,
+        queue: asyncio.Queue | None = None,
+        kalshi_rest: KalshiRestAdapter | None = None,
+        ingest_config: dict[str, Any] | None = None,
+    ) -> None:
+        from marketlab.daemon.health import HealthMonitor
+        from marketlab.daemon.registry import BookRegistry, MarketRegistry
+
+        self.settings = settings
+        self.clock = clock
+        self.store = store
+        self.parquet = parquet
+        self._cfg = ingest_config or load_ingest_config()
+        self._max_tracked = int(self._cfg.get("max_tracked_markets", 400))
+
+        self.health = health or HealthMonitor(clock)
+        self.markets = market_registry or MarketRegistry(
+            max_tracked=self._max_tracked, universes_cfg=settings.universes
+        )
+        self.books = book_registry or BookRegistry()
+        self.queue: asyncio.Queue[Event] = queue or asyncio.Queue(maxsize=50_000)
+
+        self.kalshi_rest = kalshi_rest or KalshiRestAdapter(settings, clock=clock)
+        self._kalshi_ws: Any | None = None
+
+        self.poly_gamma = GammaAdapter(settings.sources.poly_gamma, clock)
+        self.poly_clob = ClobAdapter(settings.sources.poly_clob, clock)
+        self.poly_data = DataApiAdapter(settings.sources.poly_data, clock)
+        self.poly_leaderboard = LeaderboardAdapter(
+            settings.sources.poly_leaderboard, settings.sources.poly_lb_legacy, clock
+        )
+        self.poly_us = PolymarketUsAdapter(settings.sources.poly_us_rest, clock)
+
+        #: name -> why that adapter could not be constructed. Populated by
+        #: _build_misc_adapters so `doctor` can report a wiring bug as a bug
+        #: rather than as a missing feature.
+        self._adapter_build_errors: dict[str, str] = {}
+        self._misc: dict[str, Adapter] = self._build_misc_adapters()
+
+        self.health.register("kalshi_rest", required=True, stale_after_seconds=180.0)
+        self.health.register("poly_gamma", required=False, stale_after_seconds=600.0)
+        self.health.register("poly_clob", required=False, stale_after_seconds=600.0)
+        self.health.register("poly_data", required=False, stale_after_seconds=1800.0)
+        self.health.register("poly_leaderboard", required=False, stale_after_seconds=7200.0)
+        self.health.register("poly_us_rest", required=False, stale_after_seconds=1800.0)
+        for name in self._misc:
+            self.health.register(name, required=False, stale_after_seconds=3600.0)
+
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._stop = asyncio.Event()
+        self.geoblock_result: poly_geoblock.GeoblockResult | None = None
+        self.events_processed = 0
+        self._tracked_wallets: set[str] = set()
+
+    # ------------------------------------------------------------------
+    # construction helpers
+    # ------------------------------------------------------------------
+
+    def _build_misc_adapters(self) -> dict[str, Adapter]:
+        """Best-effort construction of every optional info-source adapter.
+
+        Never raises: a source whose module is missing (e.g. ``marketlab.adapters.gdelt``
+        is an empty package as of this build) or whose constructor fails is logged and
+        simply absent from the returned dict -- `doctor`/`ingest` degrade to reporting it
+        unavailable rather than crashing the daemon.
+        """
+        s = self.settings
+        out: dict[str, Adapter] = {}
+
+        def _try(name: str, factory: Callable[[], Adapter]) -> None:
+            try:
+                out[name] = factory()
+            except Exception as exc:  # noqa: BLE001
+                # Record the reason. A construction failure is a real bug (a wiring
+                # mismatch, a renamed argument) and must not be reported downstream as
+                # "not implemented" - that hid a live TypeError in the GDELT wiring.
+                self._adapter_build_errors[name] = f"{type(exc).__name__}: {exc}"
+                log.warning("misc_adapter_unavailable", source=name, error=str(exc), exc_info=True)
+
+        def _sec() -> Adapter:
+            from marketlab.adapters.sec.client import SecAdapter
+
+            return SecAdapter(
+                sec_base=s.sources.sec_base,
+                edgar_base=s.sources.sec_edgar,
+                user_agent=s.secrets.sec_user_agent,
+                clock=self.clock,
+            )
+
+        def _gdelt() -> Adapter:
+            from marketlab.adapters.gdelt.client import GdeltAdapter
+
+            # GDELT exposes two distinct endpoints (article search and sentence-level
+            # context) rather than one base URL, so it takes both explicitly.
+            return GdeltAdapter(
+                doc_base=s.sources.gdelt_doc,
+                context_base=s.sources.gdelt_context,
+                clock=self.clock,
+            )
+
+        def _crypto() -> Adapter:
+            from marketlab.adapters.crypto.spot import CryptoSpotAdapter
+
+            return CryptoSpotAdapter(
+                coinbase_base=s.sources.coinbase_spot, binance_base=s.sources.binance_spot, clock=self.clock
+            )
+
+        def _weather() -> Adapter:
+            from marketlab.adapters.weather.nws import NwsAdapter
+
+            return NwsAdapter(base_url=s.sources.nws_base, user_agent=s.secrets.sec_user_agent, clock=self.clock)
+
+        def _fred() -> Adapter:
+            from marketlab.adapters.fred.client import FredAdapter
+
+            return FredAdapter(base_url=s.sources.fred_base, api_key=s.secrets.fred_api_key, clock=self.clock)
+
+        def _x() -> Adapter:
+            from marketlab.adapters.x.client import XAdapter
+
+            return XAdapter(bearer_token=s.secrets.x_bearer_token, clock=self.clock)
+
+        def _bluesky() -> Adapter:
+            from marketlab.adapters.bluesky.client import BlueskyAdapter
+
+            return BlueskyAdapter(
+                firehose_url=s.sources.bluesky_firehose,
+                handle=s.secrets.bluesky_handle,
+                app_password=s.secrets.bluesky_app_password,
+                clock=self.clock,
+            )
+
+        def _alpaca() -> Adapter:
+            from marketlab.adapters.alpaca.client import AlpacaAdapter
+
+            return AlpacaAdapter(
+                base_url=s.sources.alpaca_data,
+                api_key=s.secrets.alpaca_api_key,
+                secret_key=s.secrets.alpaca_secret_key,
+                clock=self.clock,
+            )
+
+        def _odds() -> Adapter:
+            from marketlab.adapters.sports_odds.client import TheOddsApiAdapter
+
+            return TheOddsApiAdapter(base_url=s.sources.odds_base, api_key=s.secrets.the_odds_api_key, clock=self.clock)
+
+        for name, factory in (
+            ("sec", _sec),
+            ("gdelt", _gdelt),
+            ("crypto_spot", _crypto),
+            ("weather_nws", _weather),
+            ("fred", _fred),
+            ("x", _x),
+            ("bluesky", _bluesky),
+            ("alpaca", _alpaca),
+            ("sports_odds", _odds),
+        ):
+            _try(name, factory)
+        return out
+
+    def misc_adapters(self) -> dict[str, Adapter]:
+        return dict(self._misc)
+
+    def adapter_build_errors(self) -> dict[str, str]:
+        """Why a given adapter is absent. Empty string means "simply not configured"."""
+        return dict(self._adapter_build_errors)
+
+    def all_adapters(self) -> dict[str, Adapter]:
+        """Every adapter this service owns, for `doctor`'s concurrent probe sweep."""
+        out: dict[str, Adapter] = {
+            "kalshi_rest": self.kalshi_rest,
+            "poly_gamma": self.poly_gamma,
+            "poly_clob": self.poly_clob,
+            "poly_data": self.poly_data,
+            "poly_leaderboard": self.poly_leaderboard,
+            "poly_us_rest": self.poly_us,
+        }
+        out.update(self._misc)
+        return out
+
+    def kalshi_ws_adapter(self, tickers: Iterable[str] = ()) -> Any:
+        """Lazily construct (and cache) the Kalshi websocket adapter, wired to this
+        service's own event queue so its output lands exactly where REST-sourced events
+        do."""
+        from marketlab.adapters.kalshi.ws import KalshiWebSocketAdapter
+
+        if self._kalshi_ws is None:
+            self._kalshi_ws = KalshiWebSocketAdapter(
+                self.settings, self.queue, clock=self.clock, tickers=tickers
+            )
+        return self._kalshi_ws
+
+    def _enqueue(self, event: Event) -> None:
+        try:
+            self.queue.put_nowait(event)
+        except asyncio.QueueFull:
+            log.warning("ingest_queue_full", event_type=event.event_type)
+
+    async def _write_parquet(self, dataset: str, rows: list[dict[str, Any]]) -> None:
+        if self.parquet is None or not rows:
+            return
+        try:
+            write = self.parquet.write
+            if asyncio.iscoroutinefunction(write):
+                await write(dataset, rows)
+            else:
+                write(dataset, rows)
+        except Exception as exc:  # noqa: BLE001 - never let storage kill ingestion
+            log.warning("parquet_write_failed", dataset=dataset, error=str(exc))
+
+    # ------------------------------------------------------------------
+    # geoblock (mandatory before any Polymarket work)
+    # ------------------------------------------------------------------
+
+    async def geoblock_check(self) -> poly_geoblock.GeoblockResult:
+        result = await poly_geoblock.enforce(self.settings)
+        self.geoblock_result = result
+        if result.blocked:
+            log.warning(
+                "polymarket_geoblock_confirmed",
+                country=result.country,
+                detail="Polymarket global execution is confirmed BLOCKED for this deployment; "
+                "read-only intelligence only, Kalshi is the sole execution venue.",
+            )
+        else:
+            log.warning(
+                "polymarket_geoblock_unexpected_unblocked",
+                country=result.country,
+                detail="geoblock probe reported NOT blocked; execution stays hard-disabled regardless.",
+            )
+        return result
+
+    # ------------------------------------------------------------------
+    # one-shot passes (also the building blocks of the continuous loops)
+    # ------------------------------------------------------------------
+
+    async def _fetch_kalshi_series_markets(self, series: Iterable[str]) -> list[dict[str, Any]]:
+        """Fetch open markets for specific series tickers.
+
+        This is the primary discovery path and it exists because the undirected scan is
+        useless here: ``/markets?status=open`` is dominated by ~12,000 zero-volume
+        ``KXMVE*`` cross-category parlays (docs/FINDINGS.md #8), so paginating 25,000 rows
+        surfaced only a handful of markets any universe actually wanted. Asking for the
+        series we care about by name returns exactly them, in one page each.
+        """
+        rows: list[dict[str, Any]] = []
+        for ticker in series:
+            try:
+                async for page in self.kalshi_rest.iter_all_markets(
+                    status="open", limit=1000, max_pages=2, series_ticker=ticker
+                ):
+                    got = page.get("markets") or []
+                    if not got:
+                        break
+                    rows.extend(got)
+            except Exception as exc:  # noqa: BLE001 - one dead series must not stop the rest
+                log.warning("kalshi_series_fetch_failed", series=ticker, error=str(exc))
+        return rows
+
+    async def _ingest_kalshi_markets_once(self, result: IngestOnceResult, *, max_pages: int | None = None) -> None:
+        try:
+            series_allowlist, _categories = collect_universe_allowlists(self.settings.universes)
+            raw_rows: list[dict[str, Any]] = []
+
+            # 1. Targeted: every series a universe named explicitly.
+            if series_allowlist:
+                raw_rows.extend(await self._fetch_kalshi_series_markets(sorted(series_allowlist)))
+
+            # 2. Broad sweep, for the category-driven universes (politics, elections,
+            #    companies, mentions) that name no explicit series. Deliberately shallow:
+            #    `/markets?status=open` is ~97% zero-volume KXMVE parlays
+            #    (docs/FINDINGS.md #8), so paging deep costs a lot of CPU and returns
+            #    almost nothing the targeted pass above missed.
+            if max_pages is None:
+                max_pages = int(self._cfg.get("kalshi_broad_sweep_pages", 3))
+            async for page in self.kalshi_rest.iter_all_markets(status="open", limit=1000, max_pages=max_pages):
+                rows = page.get("markets") or []
+                if not rows:
+                    break
+                raw_rows.extend(rows)
+
+            # De-dupe by canonical_id: the same market can legitimately be returned by
+            # more than one per-series fetch above (a ticker can match more than one
+            # universe's `kalshi_series` list), and counting it twice would be exactly
+            # the "manufactured sample size" this project exists to avoid.
+            normalized_by_id: dict[str, NormalizedMarket] = {}
+            for i, raw in enumerate(raw_rows):
+                try:
+                    market = normalize_kalshi_market(raw)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("kalshi_market_normalize_failed", error=str(exc))
+                    continue
+                normalized_by_id[market.canonical_id] = market
+                # Normalising tens of thousands of rows is pure CPU with no await in it.
+                # Unyielded it stalled the event loop for seconds on every refresh, which
+                # starved the orderbook loop down to roughly one cycle where it should
+                # manage a dozen - so the tournament saw almost no books to trade against.
+                if i % 1000 == 999:
+                    await asyncio.sleep(0)
+            normalized = list(normalized_by_id.values())
+
+            selected = select_tracked_markets(normalized, self.settings.universes, self._max_tracked)
+            now = self.clock.now()
+            rows_out: list[dict[str, Any]] = []
+            for m in selected:
+                self.markets.upsert(m)
+                if self.store is not None:
+                    with contextlib.suppress(Exception):
+                        self.store.upsert_market(m)
+                self._enqueue(market_update_event(m, self.clock, "kalshi_rest"))
+                rows_out.append(market_to_parquet_row(m, now))
+            await self._write_parquet("market_metadata", rows_out)
+
+            self.health.record_message("kalshi_rest")
+            result.kalshi_markets = len(selected)
+            log.info(
+                "ingest_kalshi_markets",
+                pages_seen=len(raw_rows),
+                normalized=len(normalized),
+                tracked=len(selected),
+                max_tracked=self._max_tracked,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"kalshi_markets: {exc}")
+            self.health.record_error("kalshi_rest", exc)
+            log.error("ingest_kalshi_markets_failed", error=str(exc))
+
+    async def _ingest_kalshi_books_and_trades_once(self, result: IngestOnceResult, *, sample: int = 25) -> None:
+        # Prioritise by liquidity. Registry order is arbitrary, and a book for a market
+        # nobody trades is worth far less to the tournament than a book for one that is
+        # actively quoting - open interest is the better proxy here than volume, since a
+        # freshly listed hourly contract can show heavy volume and no resting depth.
+        ranked = sorted(
+            self.markets.all(),
+            key=lambda m: (m.open_interest, m.volume),
+            reverse=True,
+        )
+        tickers = [m.venue_market_id for m in ranked[:sample]]
+        if not tickers:
+            return
+        # Trades are a secondary signal and cost a second request per market, so they are
+        # sampled more thinly than books to stay inside the venue's request budget.
+        trade_tickers = set(tickers[: max(1, sample // 3)])
+        books_ok = 0
+        trades_ok = 0
+        book_rows: list[dict[str, Any]] = []
+        trade_rows: list[dict[str, Any]] = []
+
+        # Fetched concurrently, bounded. Sequentially, ~200ms per orderbook meant a
+        # 120-market pass took longer than the health monitor's staleness window, so the
+        # Kalshi feed was declared STALE between passes and the supervisor correctly - but
+        # needlessly - halted all trading. The rate limiter still enforces the venue's
+        # request budget; this only stops us serialising round-trip latency.
+        semaphore = asyncio.Semaphore(_KALSHI_BOOK_CONCURRENCY)
+
+        async def fetch_one(ticker: str) -> None:
+            nonlocal books_ok, trades_ok
+            async with semaphore:
+                try:
+                    raw_ob = await self.kalshi_rest.get_orderbook(ticker)
+                    book = normalize_orderbook(ticker, raw_ob, self.clock.now())
+                    self.books.upsert(book)
+                    self._enqueue(book_update_event(book, self.clock, "kalshi_rest"))
+                    book_rows.extend(book_to_parquet_rows(book))
+                    books_ok += 1
+                    # Per-call, not per-pass: a long pass must not look like a dead feed.
+                    self.health.record_message("kalshi_rest")
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("kalshi_orderbook_failed", ticker=ticker, error=str(exc))
+                if ticker not in trade_tickers:
+                    return
+                try:
+                    raw_trades = await self.kalshi_rest.get_trades(ticker=ticker, limit=20)
+                    for raw_trade in raw_trades.get("trades") or []:
+                        try:
+                            event = trade_event_from_raw(raw_trade, self.clock, "kalshi_rest")
+                        except (KeyError, ValueError):
+                            continue
+                        self._enqueue(event)
+                        trade_rows.append(trade_to_parquet_row(event.trade))
+                        trades_ok += 1
+                    self.health.record_message("kalshi_rest")
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("kalshi_trades_failed", ticker=ticker, error=str(exc))
+
+        await asyncio.gather(*(fetch_one(t) for t in tickers))
+        await self._write_parquet("books", book_rows)
+        await self._write_parquet("trades", trade_rows)
+        result.kalshi_books = books_ok
+        result.kalshi_trades = trades_ok
+
+    async def _ingest_poly_markets_once(self, result: IngestOnceResult, *, limit: int = 150) -> None:
+        try:
+            raw_list = await self.poly_gamma.get_markets(limit=limit, closed=False, order="volume24hr", ascending=False)
+            normalized: list[NormalizedMarket] = []
+            for raw in raw_list:
+                try:
+                    normalized.append(normalize_poly_market(raw))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("poly_market_normalize_failed", error=str(exc))
+
+            mirror_cfg = (self.settings.universes or {}).get("polymarket_mirror") or {}
+            cap = int(mirror_cfg.get("max_tracked_markets", 300))
+            selected = normalized[:cap]
+            now = self.clock.now()
+            rows_out: list[dict[str, Any]] = []
+            for m in selected:
+                self.markets.upsert(m)
+                if self.store is not None:
+                    with contextlib.suppress(Exception):
+                        self.store.upsert_market(m)
+                self._enqueue(market_update_event(m, self.clock, "poly_gamma"))
+                rows_out.append(market_to_parquet_row(m, now))
+            await self._write_parquet("market_metadata", rows_out)
+
+            self.health.record_message("poly_gamma")
+            result.poly_markets = len(selected)
+            log.info("ingest_poly_markets", seen=len(normalized), tracked=len(selected))
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"poly_markets: {exc}")
+            self.health.record_error("poly_gamma", exc)
+            log.error("ingest_poly_markets_failed", error=str(exc))
+
+    async def _ingest_poly_books_once(self, result: IngestOnceResult, *, sample: int = 15) -> None:
+        poly_markets = [m for m in self.markets.all() if m.venue is Venue.POLY_GLOBAL][:sample]
+        if not poly_markets:
+            return
+        books_ok = 0
+        book_rows: list[dict[str, Any]] = []
+        for m in poly_markets:
+            token_ids = _parse_clob_token_ids(m.raw)
+            if not token_ids:
+                continue
+            try:
+                raw_book = await self.poly_clob.get_book(token_ids[0])
+                if not raw_book:
+                    continue
+                book = normalize_poly_book(token_ids[0], raw_book, self.clock.now(), canonical_id=m.canonical_id)
+                self.books.upsert(book)
+                self._enqueue(book_update_event(book, self.clock, "poly_clob"))
+                book_rows.extend(book_to_parquet_rows(book))
+                books_ok += 1
+            except Exception as exc:  # noqa: BLE001
+                log.warning("poly_book_failed", canonical_id=m.canonical_id, error=str(exc))
+        await self._write_parquet("books", book_rows)
+        if books_ok:
+            self.health.record_message("poly_clob")
+        result.poly_books = books_ok
+
+    async def _ingest_leaderboard_once(self, result: IngestOnceResult, *, quick: bool = True) -> None:
+        try:
+            if quick:
+                official = await self.poly_leaderboard.get_official(category="overall", period="week", metric="pnl", limit=25)
+                now = self.clock.now()
+                rows = self.poly_leaderboard._rows_from_official(  # noqa: SLF001 - same-team adapter internals, avoids re-sweeping every combo on a quick pass
+                    official, category="overall", period="week", metric="pnl", now=now
+                )
+            else:
+                rows = await self.poly_leaderboard.snapshot_all(limit_per_board=25)
+            if self.store is not None and rows:
+                store_rows = [
+                    StoreLeaderboardRow(
+                        snapshot_time=r.snapshot_time,
+                        category=r.category_raw or r.category.value,
+                        period=r.period,
+                        metric=r.metric,
+                        rank=r.rank,
+                        wallet=r.wallet,
+                        username=r.username,
+                        pnl=r.pnl,
+                        volume=r.volume,
+                    )
+                    for r in rows
+                ]
+                with contextlib.suppress(Exception):
+                    self.store.save_leaderboard_snapshot(store_rows)
+            self._tracked_wallets.update(r.wallet for r in rows if r.wallet)
+            self.health.record_message("poly_leaderboard")
+            result.leaderboard_rows = len(rows)
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"leaderboard: {exc}")
+            self.health.record_error("poly_leaderboard", exc)
+            log.error("ingest_leaderboard_failed", error=str(exc))
+
+    async def _ingest_poly_activity_once(self, result: IngestOnceResult, *, n_wallets: int = 5) -> None:
+        if not self._tracked_wallets:
+            return
+        activity_ok = 0
+        rows_out: list[dict[str, Any]] = []
+        for wallet in list(self._tracked_wallets)[:n_wallets]:
+            try:
+                async for event in self.poly_data.iter_trader_actions(wallet, page_size=10, max_pages=1):
+                    self._enqueue(event)
+                    if self.store is not None:
+                        from marketlab.storage.state import TraderActionRecord
+
+                        with contextlib.suppress(Exception):
+                            self.store.save_trader_action(
+                                TraderActionRecord(
+                                    wallet=event.wallet,
+                                    username=event.username,
+                                    canonical_id=event.canonical_id,
+                                    poly_market_id=event.poly_market_id,
+                                    poly_condition_id=event.poly_condition_id,
+                                    title=event.title,
+                                    outcome=event.outcome,
+                                    side=event.side,
+                                    action=event.action,
+                                    price=event.price,
+                                    size=event.size,
+                                    usd_size=event.usd_size,
+                                    category=event.category,
+                                    transaction_hash=event.transaction_hash,
+                                    event_time=event.event_time,
+                                    first_seen_time=event.first_seen_time,
+                                )
+                            )
+                    rows_out.append(trader_action_to_parquet_row(event))
+                    activity_ok += 1
+            except Exception as exc:  # noqa: BLE001
+                log.warning("poly_activity_failed", wallet=wallet, error=str(exc))
+        await self._write_parquet("trader_actions", rows_out)
+        if activity_ok:
+            self.health.record_message("poly_data")
+        result.poly_activity = activity_ok
+
+    async def run_once(self) -> IngestOnceResult:
+        """One pass of every enabled REST source. Never raises."""
+        result = IngestOnceResult()
+        geo = await self.geoblock_check()
+        result.geoblock_confirmed = geo.blocked
+        await self._ingest_kalshi_markets_once(result)
+        await self._ingest_kalshi_books_and_trades_once(result)
+        await self._ingest_poly_markets_once(result)
+        await self._ingest_poly_books_once(result)
+        await self._ingest_leaderboard_once(result, quick=True)
+        await self._ingest_poly_activity_once(result)
+        if not result.ok:
+            log.error(
+                "ingest_once_zero_markets",
+                detail="run_once ingested zero markets across every venue -- this is a failure, not a quiet no-op",
+                errors=result.errors,
+            )
+        return result
+
+    # ------------------------------------------------------------------
+    # continuous supervised loops
+    # ------------------------------------------------------------------
+
+    def _seconds(self, key: str, default: float) -> float:
+        return float(self._cfg.get(key, default))
+
+    async def _loop_kalshi_markets(self) -> None:
+        interval = self._seconds("kalshi_market_refresh_seconds", 60)
+        while not self._stop.is_set():
+            r = IngestOnceResult()
+            await self._ingest_kalshi_markets_once(r, max_pages=25)
+            await self.clock.sleep(interval)
+
+    async def _loop_kalshi_books_trades(self) -> None:
+        interval = self._seconds("kalshi_book_refresh_seconds", 5)
+        while not self._stop.is_set():
+            r = IngestOnceResult()
+            # Book breadth is the binding constraint on how many strategies can act:
+            # a market with no book is refused NO_LIQUIDITY. But one orderbook call per
+            # tracked market per cycle is far past Kalshi's public budget, so we take the
+            # most liquid `kalshi_book_sample` markets rather than all of them.
+            await self._ingest_kalshi_books_and_trades_once(
+                r, sample=int(self._cfg.get("kalshi_book_sample", 120))
+            )
+            await self.clock.sleep(interval)
+
+    async def _loop_kalshi_ws(self) -> None:
+        ws = self.kalshi_ws_adapter(self.markets.canonical_ids())
+        ws.start()
+        try:
+            while not self._stop.is_set():
+                await ws.subscribe([m.venue_market_id for m in self.markets.all()])
+                self.health.apply_probe(ws.health())
+                await self.clock.sleep(30.0)
+        finally:
+            await ws.close()
+
+    async def _loop_poly_markets(self) -> None:
+        interval = self._seconds("poly_market_refresh_seconds", 120)
+        while not self._stop.is_set():
+            r = IngestOnceResult()
+            await self._ingest_poly_markets_once(r)
+            await self.clock.sleep(interval)
+
+    async def _loop_poly_books(self) -> None:
+        interval = self._seconds("poly_book_refresh_seconds", 15)
+        while not self._stop.is_set():
+            r = IngestOnceResult()
+            await self._ingest_poly_books_once(r, sample=30)
+            await self.clock.sleep(interval)
+
+    async def _loop_poly_leaderboard(self) -> None:
+        interval = self._seconds("poly_leaderboard_refresh_seconds", 3600)
+        while not self._stop.is_set():
+            r = IngestOnceResult()
+            await self._ingest_leaderboard_once(r, quick=False)
+            await self.clock.sleep(interval)
+
+    async def _loop_poly_activity(self) -> None:
+        interval = self._seconds("poly_activity_refresh_seconds", 30)
+        while not self._stop.is_set():
+            r = IngestOnceResult()
+            await self._ingest_poly_activity_once(r, n_wallets=10)
+            await self.clock.sleep(interval)
+
+    async def _loop_sec(self) -> None:
+        from marketlab.adapters.sec.client import SecAdapter
+
+        raw_adapter = self._misc.get("sec")
+        if not isinstance(raw_adapter, SecAdapter):
+            return
+        adapter = raw_adapter
+        interval = self._seconds("sec_refresh_seconds", 300)
+        forms = ((self.settings.source_toggles or {}).get("sources", {}).get("sec", {}) or {}).get("forms")
+        since_checkpoint = "sec_filings"
+        while not self._stop.is_set():
+            try:
+                since = None
+                if self.store is not None:
+                    cp = self.store.get_checkpoint("ingest", since_checkpoint)
+                    if cp:
+                        since = datetime.fromisoformat(cp)
+                events = await adapter.iter_filing_events(forms=forms, since=since)
+                for event in events:
+                    self._enqueue(event)
+                self.health.record_message("sec")
+                if events and self.store is not None:
+                    self.store.set_checkpoint("ingest", since_checkpoint, self.clock.now().isoformat())
+                log.info("ingest_sec_filings", count=len(events))
+            except Exception as exc:  # noqa: BLE001
+                self.health.record_error("sec", exc)
+                log.warning("ingest_sec_failed", error=str(exc))
+            await self.clock.sleep(interval)
+
+    async def _loop_crypto_spot(self) -> None:
+        from marketlab.adapters.crypto.spot import CryptoSpotAdapter
+
+        raw_adapter = self._misc.get("crypto_spot")
+        if not isinstance(raw_adapter, CryptoSpotAdapter):
+            return
+        adapter = raw_adapter
+        interval = self._seconds("crypto_spot_refresh_seconds", 5)
+        symbols = ((self.settings.universes or {}).get("reference_feeds") or {}).get("crypto_spot") or ["BTC-USD"]
+        while not self._stop.is_set():
+            for symbol in symbols:
+                try:
+                    event = await adapter.get_spot(symbol)
+                    self._enqueue(event)
+                    await self._write_parquet(
+                        "prices",
+                        [
+                            {
+                                "symbol": event.symbol,
+                                "venue": event.venue,
+                                "timestamp": event.event_time,
+                                "first_seen_time": event.first_seen_time,
+                                "price": event.price,
+                                "date": event.first_seen_time.date(),
+                            }
+                        ],
+                    )
+                    self.health.record_message("crypto_spot")
+                except Exception as exc:  # noqa: BLE001
+                    self.health.record_error("crypto_spot", exc)
+                    log.warning("ingest_crypto_spot_failed", symbol=symbol, error=str(exc))
+            await self.clock.sleep(interval)
+
+    async def _loop_weather(self) -> None:
+        from marketlab.adapters.weather.nws import CITY_STATIONS, NwsAdapter
+
+        raw_adapter = self._misc.get("weather_nws")
+        if not isinstance(raw_adapter, NwsAdapter):
+            return
+        adapter = raw_adapter
+
+        interval = self._seconds("weather_refresh_seconds", 1800)
+        while not self._stop.is_set():
+            for city_key in CITY_STATIONS:
+                try:
+                    events = await adapter.forecast_events(city_key)
+                    for event in events:
+                        self._enqueue(event)
+                    self.health.record_message("weather_nws")
+                except Exception as exc:  # noqa: BLE001
+                    self.health.record_error("weather_nws", exc)
+                    log.warning("ingest_weather_failed", city=city_key, error=str(exc))
+            await self.clock.sleep(interval)
+
+    async def _loop_fred(self) -> None:
+        from marketlab.adapters.fred.client import FredAdapter
+
+        raw_adapter = self._misc.get("fred")
+        if not isinstance(raw_adapter, FredAdapter) or not raw_adapter.has_credentials:
+            return
+        adapter = raw_adapter
+        interval = self._seconds("fred_refresh_seconds", 3600)
+        series_ids = ((self.settings.universes or {}).get("reference_feeds") or {}).get("macro_fred") or []
+        while not self._stop.is_set():
+            for series_id in series_ids:
+                try:
+                    obs = await adapter.get_series(series_id)
+                    if obs:
+                        self.health.record_message("fred")
+                except Exception as exc:  # noqa: BLE001
+                    self.health.record_error("fred", exc)
+                    log.warning("ingest_fred_failed", series_id=series_id, error=str(exc))
+            await self.clock.sleep(interval)
+
+    async def _loop_probe_only(self, name: str, interval_key: str, default_seconds: float) -> None:
+        """A source we only keep a live health signal for (X, Bluesky, sports odds,
+        Alpaca, GDELT): periodic ``probe()`` calls, no deeper event pipeline yet."""
+        adapter = self._misc.get(name)
+        if adapter is None:
+            return
+        interval = self._seconds(interval_key, default_seconds)
+        while not self._stop.is_set():
+            try:
+                health = await adapter.probe()
+                self.health.apply_probe(health)
+                if health.status == SourceStatus.HEALTHY:
+                    self.health.record_message(name, health.latency_ms)
+            except Exception as exc:  # noqa: BLE001
+                self.health.record_error(name, exc)
+            await self.clock.sleep(interval)
+
+    #: task name -> configs/sources.yaml toggle key. A task with no entry here (the core
+    #: Kalshi loops) is always considered enabled -- Kalshi is the mandatory execution
+    #: venue and has no off switch.
+    _TOGGLE_KEY: dict[str, str] = {
+        "poly_markets": "polymarket_global",
+        "poly_books": "polymarket_global",
+        "poly_leaderboard": "polymarket_global",
+        "poly_activity": "polymarket_global",
+        "sec": "sec",
+        "crypto_spot": "crypto_spot",
+        "weather_nws": "weather_nws",
+        "fred": "fred",
+        "x": "x",
+        "bluesky": "bluesky",
+        "sports_odds": "sports_odds",
+        "alpaca": "alpaca",
+        "gdelt": "gdelt",
+    }
+
+    def _source_enabled(self, task_name: str) -> bool:
+        toggle_key = self._TOGGLE_KEY.get(task_name)
+        if toggle_key is None:
+            return True
+        toggles = (self.settings.source_toggles or {}).get("sources", {})
+        cfg = toggles.get(toggle_key)
+        if cfg is None:
+            return True
+        return bool(cfg.get("enabled", True))
+
+    async def start(self) -> None:
+        """Launch one independently-supervised task per source."""
+        self._stop.clear()
+        await self.geoblock_check()
+
+        loops: list[tuple[str, Callable[[], Awaitable[None]]]] = [
+            ("kalshi_markets", self._loop_kalshi_markets),
+            ("kalshi_books_trades", self._loop_kalshi_books_trades),
+            ("kalshi_ws", self._loop_kalshi_ws),
+            ("poly_markets", self._loop_poly_markets),
+            ("poly_books", self._loop_poly_books),
+            ("poly_leaderboard", self._loop_poly_leaderboard),
+            ("poly_activity", self._loop_poly_activity),
+            ("sec", self._loop_sec),
+            ("crypto_spot", self._loop_crypto_spot),
+            ("weather_nws", self._loop_weather),
+            ("fred", self._loop_fred),
+        ]
+        def _make_probe_loop(n: str, k: str, d: float) -> Callable[[], Awaitable[None]]:
+            async def _loop() -> None:
+                await self._loop_probe_only(n, k, d)
+
+            return _loop
+
+        for probe_name, interval_key, default_seconds in (
+            ("x", "odds_refresh_seconds", 300.0),
+            ("bluesky", "social_refresh_seconds", 300.0),
+            ("sports_odds", "odds_refresh_seconds", 600.0),
+            ("alpaca", "kalshi_market_refresh_seconds", 300.0),
+            ("gdelt", "gdelt_refresh_seconds", 900.0),
+        ):
+            loops.append((probe_name, _make_probe_loop(probe_name, interval_key, default_seconds)))
+
+        for name, fn in loops:
+            if not self._source_enabled(name):
+                continue
+            self._tasks[name] = asyncio.ensure_future(
+                run_supervised(name, fn, self._stop, self.clock, health=self.health)
+            )
+        log.info("ingest_service_started", tasks=list(self._tasks))
+
+    async def stop(self) -> None:
+        self._stop.set()
+        for task in self._tasks.values():
+            task.cancel()
+        for task in self._tasks.values():
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._tasks.clear()
+        if self._kalshi_ws is not None:
+            await self._kalshi_ws.close()
+        for adapter in self.all_adapters().values():
+            with contextlib.suppress(Exception):
+                await adapter.close()
+        log.info("ingest_service_stopped")
+
+
+def _parse_clob_token_ids(raw: Mapping[str, Any]) -> list[str]:
+    value = raw.get("clobTokenIds")
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return []
+        if isinstance(parsed, list):
+            return [str(v) for v in parsed]
+    return []

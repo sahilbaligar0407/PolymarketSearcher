@@ -1,0 +1,246 @@
+# Strategy tournament definition.
+#
+# Every entry below expands into one or more experiment variants.  Each variant gets its
+# own immutable experiment id and its own virtual $50 sleeve.  The Cartesian product of a
+# `variants` block is taken; `variant_limit` caps the expansion so a careless edit cannot
+# spawn thousands of noise-mining arms.
+#
+# Keep grids small.  Every added dimension is another chance to discover randomness.
+
+meta:
+  bankroll_per_variant: "50.00"
+  # Hard ceiling on total live paper sleeves. The runner refuses to exceed it.
+  max_total_variants: 400
+  # Recorded in every report so the reader knows how much searching produced a winner.
+  record_variant_count: true
+
+# Latency arms applied across execution-sensitive strategies.
+latency_arms_ms: [100, 500, 1000, 5000]
+
+strategies:
+
+  # ------------------------------------------------------------------ baselines
+  baseline_market:
+    enabled: true
+    evidence: B
+    class: marketlab.strategies.baseline_market:MarketBaselineStrategy
+    universes: [btc_15m, btc_1h, btc_daily, sports_nfl, sports_nba, economics_inflation, weather_daily_high, politics_general]
+    # Emits forecasts only, never orders. It is the bar every model must clear.
+    trades: false
+    variants: {}
+
+  random_control:
+    enabled: true
+    evidence: B
+    class: marketlab.strategies.controls:RandomDirectionStrategy
+    universes: [btc_15m, btc_1h, sports_nfl]
+    variants:
+      seed: [1, 2]
+    notes: Control group. Trades at the same frequency as a real strategy, at random.
+
+  fade_control:
+    enabled: true
+    evidence: B
+    class: marketlab.strategies.controls:FadeStrategy
+    universes: [btc_1h, sports_nfl]
+    variants:
+      fades: [momentum, copy_trader]
+    notes: >
+      Deliberately takes the opposite side. If fading a strategy is profitable, that
+      strategy's apparent edge is negative and we learn it cheaply.
+
+  # ------------------------------------------------------------------ microstructure
+  momentum:
+    enabled: true
+    evidence: A
+    class: marketlab.strategies.momentum:MomentumStrategy
+    universes: [btc_15m, btc_1h, btc_daily, altcoin_1h, index_15m]
+    variants:
+      lookback_seconds: [60, 300, 900, 3600]
+      threshold: [0.01, 0.02, 0.04]
+      volatility_filter: [false, true]
+    variant_limit: 12
+
+  mean_reversion:
+    enabled: true
+    evidence: A
+    class: marketlab.strategies.mean_reversion:MeanReversionStrategy
+    universes: [btc_15m, btc_1h, altcoin_1h, index_15m]
+    variants:
+      lookback_seconds: [300, 900, 3600]
+      entry_z: [1.5, 2.0, 2.5]
+      exit_z: [0.5]
+    variant_limit: 6
+
+  book_imbalance:
+    enabled: true
+    evidence: E
+    class: marketlab.strategies.book_imbalance:BookImbalanceStrategy
+    universes: [btc_15m, btc_1h, sports_nba, index_15m]
+    variants:
+      levels: [1, 3, 5]
+      threshold: [0.60, 0.70, 0.80]
+      # Both readings are tested. We do not assume which way imbalance points.
+      interpretation: [momentum, reversal]
+    variant_limit: 8
+
+  market_maker:
+    enabled: true
+    evidence: B
+    class: marketlab.strategies.market_maker:AvellanedaStoikovBinaryStrategy
+    universes: [btc_1h, sports_nba, politics_general]
+    variants:
+      base_spread: [0.02, 0.03, 0.05]
+      inventory_penalty: [0.5, 1.0, 2.0]
+      mode: [two_sided, one_sided, inventory_neutral]
+      news_pause: [true]
+    variant_limit: 9
+
+  # ------------------------------------------------------------------ relative value
+  binary_parity:
+    enabled: true
+    evidence: B
+    class: marketlab.strategies.binary_parity:BinaryParityStrategy
+    universes: [btc_1h, sports_nfl, sports_nba, politics_elections]
+    variants:
+      min_edge: [0.005, 0.01, 0.02]
+    variant_limit: 3
+
+  cross_venue:
+    enabled: true
+    evidence: B
+    class: marketlab.strategies.cross_venue:CrossVenueRelativeValueStrategy
+    # Polymarket is the SIGNAL source; every order goes to Kalshi.
+    universes: [btc_1h, btc_daily, politics_general, politics_elections, economics_fed, sports_nfl]
+    variants:
+      min_edge: [0.02, 0.03, 0.05, 0.075, 0.10]
+      require_match_confidence: [0.90]
+    variant_limit: 5
+
+  # ------------------------------------------------------------------ model-driven
+  btc_event:
+    enabled: true
+    evidence: B
+    class: marketlab.strategies.btc_event:BtcEventStrategy
+    universes: [btc_15m, btc_1h, btc_daily]
+    variants:
+      vol_window_minutes: [15, 60, 240]
+      entry_edge: [0.02, 0.04, 0.06]
+      model: [gbm_terminal, gbm_barrier]
+    variant_limit: 9
+
+  sports_consensus:
+    enabled: true
+    evidence: B
+    class: marketlab.strategies.sports_consensus:SportsConsensusStrategy
+    universes: [sports_nfl, sports_nba, sports_mlb, sports_nhl, sports_college]
+    variants:
+      min_edge: [0.03, 0.05, 0.08]
+      source: [vig_free_consensus, market_only, disagreement]
+      # A sports strategy must stop using pregame state once the contest starts.
+      pregame_only: [true, false]
+    variant_limit: 8
+
+  weather_forecast:
+    enabled: true
+    evidence: B
+    class: marketlab.strategies.weather:WeatherForecastStrategy
+    universes: [weather_daily_high, weather_hourly]
+    variants:
+      min_edge: [0.04, 0.08]
+      use_forecast_change: [false, true]
+    variant_limit: 4
+
+  news_probability:
+    enabled: true
+    evidence: F
+    class: marketlab.strategies.news_probability:NewsProbabilityStrategy
+    universes: [politics_general, economics_inflation, economics_fed, companies_events]
+    variants:
+      entry_edge: [0.05, 0.08, 0.12]
+      min_confidence: [0.5, 0.7]
+      multi_pass: [false]
+    variant_limit: 6
+    requires_ai: true
+
+  public_statement_event:
+    enabled: true
+    evidence: F
+    class: marketlab.strategies.social_event:PublicStatementEventStrategy
+    universes: [mentions, companies_events]
+    variants:
+      # Version one records an event study and does not trade until a category clears
+      # its out-of-sample bar. `study_only: true` is the honest default.
+      study_only: [true]
+    variant_limit: 1
+
+  # ------------------------------------------------------------------ copy trading
+  copy_trader:
+    enabled: true
+    evidence: D
+    class: marketlab.strategies.copy_trader:CopyTraderStrategy
+    # Signals come from Polymarket wallets; execution is on the matched Kalshi contract.
+    universes: [politics_general, politics_elections, sports_nfl, sports_nba, btc_1h, economics_fed]
+    variants:
+      follower_delay_seconds: [1, 5, 30, 120]
+      mode: [raw, specialist, consensus, high_conviction, early, scale_in, fade]
+    variant_limit: 10
+    notes: >
+      follower_delay_seconds=0 is deliberately absent from the grid: a zero-latency copy
+      is a diagnostic, not a strategy, and is computed in analytics instead.
+
+  copy_basket:
+    enabled: true
+    evidence: D
+    class: marketlab.strategies.copy_trader:CopyBasketStrategy
+    universes: [politics_general, sports_nfl, sports_nba, btc_1h]
+    variants:
+      basket_size: [5, 10, 20]
+      weighting: [equal, forward_validated]
+      follower_delay_seconds: [5, 30]
+    variant_limit: 6
+
+  # ------------------------------------------------------------------ ensemble
+  ensemble:
+    enabled: false
+    evidence: B
+    class: marketlab.strategies.ensemble:EnsembleStrategy
+    universes: []
+    variants: {}
+    notes: >
+      Disabled until QUALIFIED components exist. The ensemble may only draw on strategies
+      that have already passed promotion; enabling it early would just launder unproven
+      signals into a single number.
+
+# Promotion thresholds. Engineering gates, not statistical laws.
+promotion:
+  fast:
+    min_orders: 200
+    min_resolved_trades: 100
+    min_forward_days: 14
+    require_positive_after_conservative_costs: true
+  medium:
+    min_independent_trades: 75
+    min_forward_days: 30
+  slow_event:
+    min_resolved_events: 30
+    min_forward_days: 30
+  # Correlated observations do not count as independent. 500 trades on one election is
+  # closer to one observation than five hundred.
+  independence:
+    cluster_by: [event_id, resolution_date, category]
+    max_weight_per_cluster: 0.25
+  bootstrap:
+    resamples: 2000
+    confidence: 0.95
+    # An estimate whose confidence interval straddles zero is not promoted.
+    require_ci_excludes_zero: true
+
+# Champion/challenger. Once something works, it is frozen and challengers must beat it.
+champion:
+  freeze_on_promotion: true
+  challenger_must_win_forward: true
+  demote_on:
+    drawdown_pct: 0.25
+    consecutive_losing_days: 10
+    calibration_degradation: 0.05

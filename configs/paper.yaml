@@ -1,0 +1,9 @@
+# PAPER profile: live production data in, every order simulated locally.
+mode: PAPER
+
+execution:
+  limit_fill_model: TRADE_THROUGH
+
+paper:
+  bankroll_per_strategy: "50.00"
+  tick_seconds: 1.0

@@ -1,0 +1,283 @@
+# Trading universes.
+#
+# Every ticker below was verified against the live Kalshi series catalogue on 2026-09-04
+# (13,798 series across 18 categories).  Series are referenced by prefix; the ingester
+# expands each prefix into its currently open markets.
+#
+# IMPORTANT FINDING: Kalshi's finest crypto granularity is FIFTEEN MINUTES (KXBTC15M).
+# There are no 1-minute or 5-minute BTC contracts.  The PRD's BTC_1M and BTC_5M universes
+# therefore have no venue and are declared here as `available: false` rather than being
+# silently dropped - a horizon that does not exist is itself a research finding.
+
+defaults:
+  venue: kalshi
+  # The market list is dominated by ~12,000 zero-volume multi-variate "MVE" parlay
+  # contracts (category Exotics).  They are excluded globally: they are not real
+  # standalone liquidity and would swamp every universe.
+  exclude_series_prefixes:
+    - KXMVE
+  # A market must clear these before any strategy may quote it.
+  min_volume: 0
+  min_liquidity: 0
+  max_spread: 0.15
+  require_status: open
+
+universes:
+
+  # ---------------------------------------------------------------- crypto events
+  btc_15m:
+    label: BTC 15-minute directional
+    category: crypto
+    available: true
+    kalshi_series: [KXBTC15M]
+    reference_symbols: [BTC-USD]
+    horizon_seconds: 900
+    notes: >
+      The shortest BTC horizon Kalshi lists.  Deliberately used to test whether a
+      home/local setup is latency-competitive at all.  A losing result here is useful.
+
+  btc_1h:
+    label: BTC hourly above/below and range
+    category: crypto
+    available: true
+    kalshi_series: [KXBTCD, KXBTC]
+    reference_symbols: [BTC-USD]
+    horizon_seconds: 3600
+
+  btc_daily:
+    label: BTC daily
+    category: crypto
+    available: true
+    kalshi_series: [KXBTCMAXD, BTCD, BTC]
+    reference_symbols: [BTC-USD]
+    horizon_seconds: 86400
+
+  btc_1m:
+    label: BTC 1-minute
+    category: crypto
+    available: false
+    unavailable_reason: >
+      No Kalshi series lists a 1-minute BTC contract as of 2026-09-04.  Recorded so the
+      absence is explicit rather than an unnoticed gap.
+    kalshi_series: []
+
+  btc_5m:
+    label: BTC 5-minute
+    category: crypto
+    available: false
+    unavailable_reason: No Kalshi series lists a 5-minute BTC contract as of 2026-09-04.
+    kalshi_series: []
+
+  altcoin_15m:
+    label: ETH/SOL/XRP/DOGE 15-minute
+    category: crypto
+    available: true
+    kalshi_series: [KXETH15M, KXSOL15M, KXXRP15M, KXDOGE15M]
+    reference_symbols: [ETH-USD, SOL-USD, XRP-USD, DOGE-USD]
+    horizon_seconds: 900
+
+  altcoin_1h:
+    label: Altcoin hourly
+    category: crypto
+    available: true
+    kalshi_series: [KXETHD, KXETH, KXSOLD, KXSOL, KXSOLE, KXDOGED, KXDOGE, KXXRPD, KXXRP]
+    reference_symbols: [ETH-USD, SOL-USD, XRP-USD, DOGE-USD]
+    horizon_seconds: 3600
+
+  # ---------------------------------------------------------------- equity indices
+  index_15m:
+    label: S&P 500 15-minute
+    category: finance
+    available: true
+    kalshi_series: [KXINX15M]
+    reference_symbols: [SPY]
+    horizon_seconds: 900
+
+  index_daily:
+    label: Index daily direction and close
+    category: finance
+    available: true
+    kalshi_series: [KXINXAB, KXINXZ, KXINXDUD, KXNASDAQ100Z, KXNASDAQ100U, KXNASDAQDUD]
+    reference_symbols: [SPY, QQQ]
+    horizon_seconds: 86400
+
+  # ---------------------------------------------------------------- sports
+  sports_nfl:
+    label: NFL games, spreads, totals
+    category: sports
+    available: true
+    kalshi_series: [KXNFLGAME, KXNFLSPREAD, KXNFLGAMESPECIALS, KXNFLWINS]
+    odds_api_sport: americanfootball_nfl
+    live_state_required: true
+
+  sports_nba:
+    label: NBA games, spreads, totals
+    category: sports
+    available: true
+    kalshi_series: [KXNBAGAME, KXNBASPREAD, KXNBAGAMES, KXNBAGAMESPECIALS, KXNBAWINS]
+    odds_api_sport: basketball_nba
+    live_state_required: true
+
+  sports_mlb:
+    label: MLB games
+    category: sports
+    available: true
+    kalshi_series: [KXMLBGAME, KXMLBSPREAD, KXMLBTOTAL]
+    odds_api_sport: baseball_mlb
+    live_state_required: true
+
+  sports_nhl:
+    label: NHL games and totals
+    category: sports
+    available: true
+    kalshi_series: [KXNHLGAME, KXNHLTOTAL]
+    odds_api_sport: icehockey_nhl
+    live_state_required: true
+
+  sports_college:
+    label: College football and basketball
+    category: sports
+    available: true
+    kalshi_series: [KXNCAAFGAME, KXNCAAFSPREAD, KXNCAABGAME]
+    odds_api_sport: americanfootball_ncaaf
+    live_state_required: true
+
+  # ---------------------------------------------------------------- economics
+  economics_inflation:
+    label: CPI and inflation
+    category: economics
+    available: true
+    kalshi_series: [KXCPICOMBO, KXCPISHELTER, CPI, CPICORE, KXACPICORE, KXTOBACCPI]
+    fred_series: [CPIAUCSL, CPILFESL, CPIUFDSL]
+    scheduled_release: true
+
+  economics_fed:
+    label: Fed funds and rate path
+    category: economics
+    available: true
+    kalshi_series: [KXFED, KXRATECUTS, KXFEDCHGCOUNT, KXDOTPLOT]
+    fred_series: [DFF, FEDFUNDS, DGS2, DGS10]
+    scheduled_release: true
+
+  economics_jobs:
+    label: Employment and jobs data
+    category: economics
+    available: true
+    kalshi_series: [KXJOLTSOPEN, NFPDELAY, KXTEMPHELP]
+    fred_series: [PAYEMS, UNRATE, JTSJOL, ICSA]
+    scheduled_release: true
+
+  economics_growth:
+    label: GDP and recession
+    category: economics
+    available: true
+    kalshi_series: [GDP, KXRECSSNBER, REALWAGES]
+    fred_series: [GDPC1, GDP, USREC]
+
+  # ---------------------------------------------------------------- weather
+  weather_daily_high:
+    label: Daily high temperature by city
+    category: weather
+    available: true
+    kalshi_series:
+      - KXHIGHNY
+      - KXHIGHCHI
+      - KXHIGHAUS
+      - KXHIGHMIA
+      - KXHIGHDEN
+      - KXHIGHLAX
+      - KXHIGHPHIL
+      - KXHIGHHOU
+      - KXHIGHTDC
+      - KXHIGHTBOS
+      - KXHIGHTPHX
+      - KXHIGHTSEA
+      - KXHIGHTSFO
+      - KXHIGHTDAL
+      - KXHIGHTATL
+      - KXHIGHTLV
+      - KXHIGHTMIN
+      - KXHIGHTOKC
+      - KXHIGHTSAN
+      - KXHIGHTEWR
+      - KXHIGHTTTN
+    # NWS station mapping used by the weather strategy. Verified station identifiers.
+    stations:
+      KXHIGHNY: KNYC
+      KXHIGHCHI: KMDW
+      KXHIGHAUS: KAUS
+      KXHIGHMIA: KMIA
+      KXHIGHDEN: KDEN
+      KXHIGHLAX: KLAX
+      KXHIGHPHIL: KPHL
+      KXHIGHHOU: KIAH
+      KXHIGHTDC: KDCA
+      KXHIGHTBOS: KBOS
+      KXHIGHTPHX: KPHX
+      KXHIGHTSEA: KSEA
+      KXHIGHTSFO: KSFO
+      KXHIGHTDAL: KDFW
+      KXHIGHTATL: KATL
+      KXHIGHTLV: KLAS
+      KXHIGHTMIN: KMSP
+      KXHIGHTOKC: KOKC
+      KXHIGHTSAN: KSAN
+      KXHIGHTEWR: KEWR
+      KXHIGHTTTN: KTTN
+
+  weather_hourly:
+    label: Hourly directional temperature
+    category: weather
+    available: true
+    kalshi_series: [KXTEMPNYCH, KXTEMPCHIH, KXTEMPLAXH, KXTEMPBOSH, KXTEMPAUSH, KXTEMPDCH, KXTEMPMIAH, KXHIGHNYD]
+    horizon_seconds: 3600
+
+  # ---------------------------------------------------------------- politics
+  politics_general:
+    label: Political events and legislation
+    category: politics
+    available: true
+    kalshi_series_categories: [Politics]
+    # Political markets resolve on a defined authority; the matcher must preserve it.
+    require_resolution_source: true
+
+  politics_elections:
+    label: Elections and nominations
+    category: politics
+    available: true
+    kalshi_series_categories: [Elections]
+    require_resolution_source: true
+
+  # ---------------------------------------------------------------- companies / mentions
+  companies_events:
+    label: Company events and KPIs
+    category: tech
+    available: true
+    kalshi_series_categories: [Companies]
+    sec_linked: true
+
+  mentions:
+    label: Public-statement and mention markets
+    category: other
+    available: true
+    kalshi_series_categories: [Mentions]
+    kalshi_series: [KXELONMENTION, KXCOMMENTTRUMP, KXSECPRESSMENTION]
+    notes: >
+      Kalshi lists a whole "Mentions" category - markets on what a public figure will say.
+      These are the natural venue for the public-statement event tracker, and unlike a
+      stock they resolve on the statement itself rather than on a price reaction.
+
+# Reference (non-tradeable) data series pulled purely to price the above.
+reference_feeds:
+  crypto_spot: [BTC-USD, ETH-USD, SOL-USD, XRP-USD, DOGE-USD]
+  equities: [SPY, QQQ, IWM]
+  macro_fred: [DFF, DGS2, DGS10, CPIAUCSL, UNRATE, PAYEMS]
+
+# Polymarket is mirrored READ-ONLY for cross-venue comparison against the Kalshi
+# contracts above.  Nothing here is ever executed on Polymarket.
+polymarket_mirror:
+  enabled: true
+  execution: false
+  track_categories: [crypto, sports, politics, economics, finance, weather, tech]
+  max_tracked_markets: 300
+  min_volume_24h: 1000

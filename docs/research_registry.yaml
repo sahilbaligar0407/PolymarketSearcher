@@ -1,0 +1,238 @@
+# Evidence registry.
+#
+# Every strategy family declares where its idea came from and how strong that provenance
+# is.  This is deliberately not a ranking of expected profit - it is a record of how much
+# prior belief the idea deserves before MarketLab's own forward tests speak.
+#
+# Evidence classes:
+#   A  credible academic empirical evidence
+#   B  established quantitative theory / mechanism
+#   C  prominent open-source implementation pattern
+#   D  directly observable public trader behaviour
+#   E  plausible market-microstructure hypothesis
+#   F  AI / social hypothesis
+#   G  viral or unverified claim
+#
+# Class G may be investigated but can never skip validation.
+
+evidence_classes:
+  A: credible academic empirical evidence
+  B: established quantitative theory or mechanism
+  C: prominent open-source implementation pattern
+  D: directly observable public trader behaviour
+  E: plausible market microstructure hypothesis
+  F: AI or social hypothesis
+  G: viral or unverified claim
+
+strategies:
+
+  baseline_market:
+    evidence: B
+    source_family: definitional
+    implementation_status: required
+    rationale: >
+      p_yes = current midpoint.  Produces no trade by itself.  It exists so that every
+      other model has to demonstrate it actually improves probability accuracy rather
+      than merely being complicated.
+    references: []
+
+  time_series_momentum:
+    evidence: A
+    source_family: academic
+    implementation_status: required
+    rationale: >
+      Moskowitz, Ooi and Pedersen documented significant time-series momentum across 58
+      liquid futures and forwards.  That justifies momentum as a baseline arm on BTC and
+      equity-derived signals.  It is NOT evidence that the same coefficients transfer to
+      a bounded binary contract in 2026, so every horizon is fitted and tested separately.
+    references:
+      - "Moskowitz, Ooi, Pedersen (2012), Time Series Momentum, JFE"
+
+  pairs_mean_reversion:
+    evidence: A
+    source_family: academic
+    implementation_status: required
+    rationale: >
+      Gatev, Goetzmann and Rouwenhorst reported meaningful historical excess returns from
+      a systematic pairs rule on US equities after conservative transaction costs.
+      Included as a relative-value baseline; current data decides whether it survives
+      today's costs.
+    references:
+      - "Gatev, Goetzmann, Rouwenhorst (2006), Pairs Trading, RFS"
+
+  short_horizon_mean_reversion:
+    evidence: E
+    source_family: microstructure
+    implementation_status: required
+    rationale: >
+      Z-score of short-term returns, deviation from rolling VWAP, temporary cross-venue
+      divergence.  Run separately from momentum - the two are not blended until the
+      experiment phase shows when each regime applies.
+
+  avellaneda_stoikov_binary:
+    evidence: B
+    source_family: academic_theory
+    implementation_status: required
+    rationale: >
+      Inventory-aware quoting adapted - not copied - to bounded $0-$1 claims.  The
+      original model assumes an unbounded mid-price and normal returns; a binary contract
+      has a hard floor and ceiling and its variance collapses near resolution.
+    references:
+      - "Avellaneda, Stoikov (2008), High-frequency trading in a limit order book"
+
+  binary_parity:
+    evidence: B
+    source_family: no_arbitrage
+    implementation_status: required
+    rationale: >
+      Logically complementary YES/NO contracts must cost less than the guaranteed payout
+      after all costs.  A displayed difference is not profit until both legs are
+      simultaneously executable at quoted size with identical resolution semantics.
+
+  cross_venue_relative_value:
+    evidence: B
+    source_family: no_arbitrage
+    implementation_status: required
+    rationale: >
+      Kalshi vs Polymarket-global vs vig-free sportsbook consensus vs external quant
+      estimate.  Because global Polymarket cannot be traded from the US, a Polymarket
+      discrepancy is a SIGNAL TO TRADE THE EQUIVALENT KALSHI CONTRACT, never one leg of a
+      two-venue execution.  Recent work confirms prediction-market arbitrage is real while
+      other work shows apparent spreads are often artefacts of asynchronous timestamps,
+      thin liquidity, or contract-definition mismatch.
+    references:
+      - "Arbitrage in Prediction Markets, AFT 2025"
+
+  book_imbalance:
+    evidence: E
+    source_family: microstructure
+    implementation_status: required
+    rationale: >
+      bid_size / (bid_size + ask_size) at several depths, microprice, aggressor flow.
+      Both momentum and reversal interpretations are tested.  Class E until MarketLab's
+      own forward data says otherwise.
+
+  btc_event:
+    evidence: B
+    source_family: derivatives_theory
+    implementation_status: required
+    rationale: >
+      Threshold contracts on BTC admit a driftless-GBM terminal probability given spot,
+      strike, realized volatility and time remaining.  The 1-minute horizon is expected to
+      be too latency-sensitive for a home setup - proving that is a useful result, not a
+      failure.
+
+  sports_consensus:
+    evidence: B
+    source_family: market_efficiency
+    implementation_status: required
+    rationale: >
+      Vig-free sportsbook consensus is a strong reference probability.  Never compare
+      American odds to a contract price without converting and removing the bookmaker
+      margin.  A sports strategy must stop using pregame state once the contest goes live.
+
+  news_probability:
+    evidence: F
+    source_family: ai
+    implementation_status: required
+    rationale: >
+      A local model reads point-in-time evidence and emits a calibrated probability.
+      Trades only when model_edge exceeds fees, slippage and an uncertainty buffer.  Must
+      beat the market-midpoint baseline out of sample before it may claim predictive value.
+
+  public_statement_event:
+    evidence: F
+    source_family: event_study
+    implementation_status: required
+    rationale: >
+      Generic public-figure statement tracker, configured for Trump first.  Version one is
+      an EVENT STUDY, not a trade rule - it measures forward abnormal returns by
+      action_type across 1m/5m/15m/1h/close/1d/3d/5d before any category is allowed to
+      trade.  Sentiment is explicitly NOT mapped to buy/sell.
+
+  polymarket_copy_trader:
+    evidence: D
+    source_family: observed_behaviour
+    implementation_status: required
+    rationale: >
+      The official leaderboard and public activity API make dynamic trader discovery
+      straightforward.  Traders are frozen as a candidate set at discovery and scored on
+      FORWARD performance only.  Follower execution always uses the Kalshi book available
+      after MarketLab observed the trade plus a configured delay - copying at the source
+      trader's own price is prohibited.  A deliberate COPY_FADE control group determines
+      whether the apparent edge is informative at all.
+
+  sec_filing_event:
+    evidence: E
+    source_family: primary_disclosure
+    implementation_status: required
+    rationale: >
+      8-K, 10-Q, 10-K, Form 4.  Routine scheduled insider sales under a 10b5-1 plan are
+      not bearish signals and are flagged as routine before any strategy sees them.
+
+  weather_forecast_gap:
+    evidence: B
+    source_family: physical_model
+    implementation_status: required
+    rationale: >
+      Official NWS forecasts and observations versus the contract price, plus the market's
+      lag in reacting to forecast updates.
+
+  ensemble:
+    evidence: B
+    source_family: portfolio_theory
+    implementation_status: required
+    rationale: >
+      Only QUALIFIED strategies enter.  Weights are long-only and capped; the optimizer is
+      not permitted to invent a leveraged long/short book because historical covariance
+      liked it.  A position requires at least two independent signal families to agree.
+
+  licensed_political_trades:
+    evidence: E
+    source_family: disclosure
+    implementation_status: gated
+    rationale: >
+      Interface only.  A dataset is ingested ONLY when its licence explicitly permits this
+      use.  The House disclosure site states that using those statements for a commercial
+      purpose is unlawful outside the statutory exceptions, and both chambers allow filing
+      up to 45 days after a transaction.  Transaction date and publication date are stored
+      separately, and a disclosure may enter a historical test only at the timestamp the
+      public actually learned of it.
+    legal_gate: true
+
+  viral_wallet_clone:
+    evidence: G
+    source_family: social_claim
+    implementation_status: research_only
+    rationale: >
+      "Turned $100 into $1m" posts enter the database as UNVERIFIED_SOCIAL_CLAIM and are
+      validated against public trade and position history before they may influence
+      anything.  No strategy copies an UNVERIFIED candidate.
+
+# Architectural references studied for design, never imported wholesale and never treated
+# as evidence of profitability.
+open_source_references:
+  hummingbot:
+    class: C
+    used_for: connector organisation, order lifecycle, market-making abstractions
+  freqtrade:
+    class: C
+    used_for: strategy configuration, dry-run discipline, reporting patterns
+  nautilus_trader:
+    class: C
+    used_for: unified research/simulation/live event-driven architecture
+  backtrader:
+    class: C
+    used_for: API design reference only; architecture predates the event-driven design here
+  tradingagents:
+    class: C
+    used_for: multi-agent role separation; its point-in-time corrections are a cautionary tale
+  fingpt:
+    class: C
+    used_for: financial NLP data cleaning ideas
+  ai_hedge_fund:
+    class: C
+    used_for: agent orchestration patterns only - its own README calls it a non-trading proof of concept
+  polymarket_agents:
+    class: C
+    used_for: platform-specific reference

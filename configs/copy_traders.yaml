@@ -1,0 +1,104 @@
+# Copy-trading configuration.
+#
+# Traders are DISCOVERED from the official Polymarket leaderboard, then tracked FORWARD.
+# Nothing here hard-codes a wallet: rankings change, and picking today's winner and
+# backtesting their past is exactly the self-deception this system exists to avoid.
+
+discovery:
+  enabled: true
+  # One snapshot per day; the whole board is stored, not just the traders we like.
+  schedule_seconds: 86400
+  top_n_per_board: 50
+
+  # VERIFIED 2026-09-04 against the live API, which does not behave as its docs suggest:
+  #
+  #   data-api.polymarket.com/v1/leaderboard
+  #     `category` IS server-validated (400 on an unknown value) and genuinely filters.
+  #     `period` and `metric` are SILENTLY IGNORED - identical rows come back for every
+  #     value. Sweeping them would have produced 15 redundant queries masquerading as 15
+  #     independent boards, which is exactly the kind of fake sample size this project
+  #     exists to avoid.
+  #
+  #   lb-api.polymarket.com/{profit,volume}?window={1d,7d,30d,all}
+  #     `window` IS honoured and does change the ranking. No category dimension.
+  #
+  # So the time dimension comes from the legacy host and the category dimension from the
+  # official one. The union is deduped by wallet.
+  category_boards:
+    host: official
+    categories: [overall, crypto, sports, politics, economics, finance, weather, tech]
+
+  period_boards:
+    host: legacy
+    metrics: [profit, volume]
+    windows: [1d, 7d, 30d, all]
+
+# A trader must clear these before entering the candidate set. None of them is a
+# statement that the trader is good - only that they are measurable.
+candidate_filters:
+  min_observed_trades: 30
+  min_history_days: 30
+  min_distinct_markets: 10
+  min_reported_volume: 10000
+  # One enormous lucky trade should not create a winner.
+  max_single_trade_pnl_share: 0.50
+  # Concentration measured as HHI over market exposure.
+  max_position_concentration: 0.60
+  # Recent collapse disqualifies regardless of all-time numbers.
+  min_recent_performance_slope: -0.50
+
+# Ranking. Explicitly NOT raw win rate: a 90% win rate with asymmetric losses loses money.
+scoring:
+  weights:
+    expectancy_per_trade: 0.30
+    profit_factor: 0.20
+    forward_validated_pnl: 0.25
+    consistency: 0.15
+    calibration: 0.10
+  penalties:
+    short_history: 0.30
+    single_lucky_trade: 0.40
+    extreme_concentration: 0.25
+    recent_collapse: 0.35
+    low_market_liquidity: 0.20
+    # Entry prices that vanish once follower delay is applied are worthless to us.
+    entry_advantage_decay: 0.40
+
+tracking:
+  # Poll each tracked wallet public activity this often.
+  activity_poll_seconds: 30
+  max_tracked_wallets: 40
+  # Forward observation required before a trader may influence a live-candidate strategy.
+  min_forward_days: 21
+  min_forward_trades: 25
+
+follower_execution:
+  # Copying at the source trader own price is prohibited. Execution always uses the
+  # KALSHI book available after MarketLab observed the trade, plus this delay.
+  delays_seconds: [1, 5, 15, 30, 120, 300, 600]
+  # Computed in analytics as a diagnostic ceiling, never traded.
+  theoretical_zero_delay_diagnostic: true
+  # A Polymarket trade only becomes a Kalshi order when the matcher approved the pair.
+  require_market_match: true
+  min_match_confidence: 0.90
+  max_stake_per_signal_pct: 0.05
+
+modes:
+  raw:             {description: follow every qualifying action}
+  specialist:      {description: follow only in the best category for that trader}
+  high_conviction: {description: follow only unusually large positions, size_z_min: 2.0}
+  consensus:       {description: trade only when several tracked winners align, min_agreeing: 3}
+  early:           {description: follow initial entry only}
+  scale_in:        {description: copy proportional position changes}
+  fade:            {description: deliberately take the opposite side, control_group: true}
+
+# Viral social claims enter here and stay quarantined until public data confirms them.
+social_challenges:
+  enabled: true
+  # No strategy may copy an UNVERIFIED candidate. Enforced in code, not just policy.
+  allow_trading_status: [ONCHAIN_OR_API_CONFIRMED]
+  statuses: [UNVERIFIED, PARTIALLY_VERIFIED, ONCHAIN_OR_API_CONFIRMED, DISPROVEN, STALE]
+  notes: >
+    Turned-100-into-1m posts are marketing until public trade and position history
+    reproduces the claim. Reported bot-share statistics about top wallets are hypotheses,
+    not audited identity data; observed trade performance remains the only real signal.

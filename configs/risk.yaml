@@ -1,0 +1,16 @@
+# Risk limits. These apply to the single real $50 bankroll and, in scaled form, to every
+# virtual $50 paper sleeve.
+live:
+  initial_capital: "50.00"
+  leverage: false
+  borrowing: false
+  martingale: false
+  max_single_event_loss_pct: "0.04"
+  max_strategy_exposure_pct: "0.20"
+  max_category_exposure_pct: "0.30"
+  max_correlated_cluster_pct: "0.30"
+  daily_loss_pause_pct: "0.10"
+  total_drawdown_pause_pct: "0.20"
+  auto_replenish: false
+  death_floor: "1.00"
+  strict_audit: true

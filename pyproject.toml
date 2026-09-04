@@ -1,0 +1,75 @@
+[project]
+name = "marketlab"
+version = "0.1.0"
+description = "Autonomous multi-market prediction, news, copy-trader and quant research engine"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "httpx>=0.27",
+    "websockets>=13.0",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "typer>=0.15",
+    "rich>=13.9",
+    "orjson>=3.10",
+    "polars>=1.12",
+    "pyarrow>=18.0",
+    "duckdb>=1.1",
+    "numpy>=2.0",
+    "scipy>=1.14",
+    "statsmodels>=0.14",
+    "scikit-learn>=1.5",
+    "tenacity>=9.0",
+    "feedparser>=6.0",
+    "trafilatura>=2.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "cryptography>=43.0",
+    "structlog>=24.4",
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "types-PyYAML",
+]
+
+[project.scripts]
+marketlab = "marketlab.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["marketlab"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+ignore = ["E501", "B008", "SIM108"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = false
+ignore_missing_imports = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "integration: hits a real external API; deselect with -m 'not integration'",
+    "slow: long-running test",
+]

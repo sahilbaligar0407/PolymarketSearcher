@@ -1,0 +1,92 @@
+# MarketLab base configuration.
+# Overlaid by <profile>.yaml (paper.yaml by default), then by the split config files
+# (universes.yaml, strategies.yaml, risk.yaml, sources.yaml, copy_traders.yaml).
+
+mode: PAPER
+
+execution:
+  signal_to_order_ms: 100
+  network_latency_ms: 75
+  processing_latency_ms: 25
+  # TOUCH is a research diagnostic only. TRADE_THROUGH is the conservative default.
+  # QUEUE is the preferred advanced model once queue-position estimation is trusted.
+  limit_fill_model: TRADE_THROUGH
+  max_book_age_seconds: 30.0
+  slippage_buffer: "0.005"
+  uncertainty_buffer: "0.01"
+
+paper:
+  bankroll_per_strategy: "50.00"
+  tick_seconds: 1.0
+  snapshot_seconds: 300.0
+  max_concurrent_strategies: 400
+
+ingest:
+  # Kalshi is the execution venue: poll it hardest.
+  kalshi_market_refresh_seconds: 60
+  # One orderbook call per market per cycle; keep sample x (1/interval) inside Kalshi's
+  # public request budget. 120 books + 40 trade calls every 10s is ~16 req/s.
+  kalshi_book_refresh_seconds: 10
+  kalshi_book_sample: 120
+  # The undirected /markets sweep is ~97% zero-volume parlays; keep it shallow.
+  kalshi_broad_sweep_pages: 3
+  kalshi_trades_refresh_seconds: 10
+  # Polymarket is read-only intelligence.
+  poly_market_refresh_seconds: 120
+  poly_book_refresh_seconds: 15
+  poly_leaderboard_refresh_seconds: 3600
+  poly_activity_refresh_seconds: 30
+  gdelt_refresh_seconds: 900
+  sec_refresh_seconds: 300
+  crypto_spot_refresh_seconds: 5
+  weather_refresh_seconds: 1800
+  fred_refresh_seconds: 3600
+  odds_refresh_seconds: 600
+  social_refresh_seconds: 300
+  # Cap on markets tracked with live books, to keep a laptop honest.
+  max_tracked_markets: 400
+  min_market_volume: 0
+
+ai:
+  enabled: true
+  # Event-triggered inference; the daemon stays alive but does not burn compute per tick.
+  triggers:
+    - high_impact_news
+    - sec_filing
+    - large_market_move
+    - large_cross_venue_discrepancy
+    - tracked_trader_action
+    - scheduled_refresh
+  scheduled_refresh_seconds: 1800
+  large_move_threshold: "0.05"
+
+  # MEASURED on this machine, full structured assessment (not a toy prompt):
+  #   qwen3:0.6b            ~2.5 s
+  #   qwen2.5vl:7b          ~9.5 s
+  #   glm-4.7-flash         ~61 s
+  #   gpt-oss:20b           ~100-124 s
+  #
+  # gpt-oss:20b is the best reasoner but at ~2 minutes per assessment with 2 concurrent
+  # slots it caps out near one market per minute. That is fine for a political or economic
+  # contract resolving in weeks; it is useless for anything intraday. So the analyst model
+  # is chosen per horizon rather than globally, and the fast model does the cheap triage
+  # pass that decides whether the slow model is worth waking at all.
+  model_by_horizon:
+    # close_time within this many seconds -> use the fast model or skip AI entirely
+    fast_threshold_seconds: 3600
+    fast_model: qwen2.5vl:7b
+    slow_model: gpt-oss:20b
+    # Cheap relevance triage before committing to a full assessment.
+    triage_model: qwen3:0.6b
+    triage_enabled: true
+
+  max_concurrent_inferences: 2
+  # Must exceed the slowest model's full-assessment time or every call abstains on timeout.
+  timeout_seconds: 180
+  # Multi-pass analyst/skeptic/resolver is an experiment arm, not the default: at ~2 min a
+  # pass it triples an already expensive call and must earn that cost empirically.
+  multi_pass: false
+
+logging:
+  level: INFO
+  json_console: false

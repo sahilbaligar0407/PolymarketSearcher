@@ -1,0 +1,161 @@
+{
+  "pid": 13960,
+  "mode": "PAPER",
+  "started_at": "2026-09-04T21:55:59.318458+00:00",
+  "uptime_seconds": 544.1,
+  "events_processed": 18273,
+  "markets_tracked": 400,
+  "sleeves_alive": 388,
+  "sleeves_dead": 0,
+  "orders_submitted": 4542,
+  "orders_blocked": 0,
+  "trading_allowed": true,
+  "trading_detail": "",
+  "last_heartbeat": "2026-09-04T22:05:03.452425+00:00",
+  "feed_health": {
+    "kalshi_rest": {
+      "status": "healthy",
+      "required": true,
+      "last_message_at": "2026-09-04T22:05:03.380172+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "poly_gamma": {
+      "status": "healthy",
+      "required": false,
+      "last_message_at": "2026-09-04T22:04:02.862890+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "poly_clob": {
+      "status": "healthy",
+      "required": false,
+      "last_message_at": "2026-09-04T22:04:50.834792+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "poly_data": {
+      "status": "healthy",
+      "required": false,
+      "last_message_at": "2026-09-04T22:05:02.461326+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "poly_leaderboard": {
+      "status": "healthy",
+      "required": false,
+      "last_message_at": "2026-09-04T21:56:01.936546+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "poly_us_rest": {
+      "status": "degraded",
+      "required": false,
+      "last_message_at": null,
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "sec": {
+      "status": "healthy",
+      "required": false,
+      "last_message_at": "2026-09-04T22:01:11.378029+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "gdelt": {
+      "status": "healthy",
+      "required": false,
+      "last_message_at": "2026-09-04T21:56:58.584465+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "crypto_spot": {
+      "status": "healthy",
+      "required": false,
+      "last_message_at": "2026-09-04T22:05:00.245252+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "weather_nws": {
+      "status": "healthy",
+      "required": false,
+      "last_message_at": "2026-09-04T21:56:00.197763+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "fred": {
+      "status": "degraded",
+      "required": false,
+      "last_message_at": null,
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "x": {
+      "status": "healthy",
+      "required": false,
+      "last_message_at": "2026-09-04T21:55:59.342766+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "bluesky": {
+      "status": "healthy",
+      "required": false,
+      "last_message_at": "2026-09-04T22:01:11.688004+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "alpaca": {
+      "status": "healthy",
+      "required": false,
+      "last_message_at": "2026-09-04T22:05:01.851719+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "sports_odds": {
+      "status": "healthy",
+      "required": false,
+      "last_message_at": "2026-09-04T21:55:59.371013+00:00",
+      "latency_ms": null,
+      "error_count": 0,
+      "reconnect_count": 0,
+      "detail": ""
+    },
+    "kalshi_ws": {
+      "status": "down",
+      "required": false,
+      "last_message_at": null,
+      "latency_ms": null,
+      "error_count": 14,
+      "reconnect_count": 14,
+      "detail": "server rejected WebSocket connection: HTTP 401"
+    }
+  }
+}

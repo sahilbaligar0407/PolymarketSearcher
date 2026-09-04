@@ -1,0 +1,11 @@
+# Copy to live.yaml only after `marketlab live doctor` passes.
+# Live additionally requires LIVE_TRADING_ENABLED=YES_I_ACCEPT_REAL_LOSS in .env and the
+# explicit flag: marketlab live start --acknowledge-real-money-risk
+mode: LIVE
+
+execution:
+  limit_fill_model: QUEUE
+  max_book_age_seconds: 5.0
+
+paper:
+  bankroll_per_strategy: "50.00"
