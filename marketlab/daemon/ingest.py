@@ -1097,6 +1097,7 @@ class IngestService:
 
         settled = 0
         semaphore = asyncio.Semaphore(_KALSHI_BOOK_CONCURRENCY)
+        store = self.store  # narrowed for the closure below
 
         async def resolve(canonical_id: str) -> None:
             nonlocal settled
@@ -1107,7 +1108,8 @@ class IngestService:
                 except Exception as exc:  # noqa: BLE001
                     log.debug("settlement_fetch_failed", ticker=ticker, error=str(exc))
                     return
-            market_raw = raw.get("market") if isinstance(raw.get("market"), dict) else raw
+            nested = raw.get("market")
+            market_raw: dict[str, Any] = nested if isinstance(nested, dict) else raw
             event = settlement_event_from_raw(
                 market_raw, canonical_id, Venue.KALSHI, self.clock, "kalshi_rest"
             )
@@ -1115,7 +1117,7 @@ class IngestService:
                 return  # not resolved yet; try again next pass
             self._enqueue(event)
             try:
-                self.store.save_settlement(
+                store.save_settlement(
                     StoreSettlement(
                         canonical_id=canonical_id,
                         venue=Venue.KALSHI,

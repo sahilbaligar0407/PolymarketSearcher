@@ -2,21 +2,21 @@
   "pid": 24188,
   "mode": "PAPER",
   "started_at": "2026-09-07T03:59:26.170470+00:00",
-  "uptime_seconds": 272.3,
-  "events_processed": 9608,
-  "markets_tracked": 523,
+  "uptime_seconds": 332.3,
+  "events_processed": 11255,
+  "markets_tracked": 527,
   "sleeves_alive": 388,
   "sleeves_dead": 0,
-  "orders_submitted": 1543,
+  "orders_submitted": 1776,
   "orders_blocked": 0,
   "trading_allowed": true,
   "trading_detail": "",
-  "last_heartbeat": "2026-09-07T04:03:58.435189+00:00",
+  "last_heartbeat": "2026-09-07T04:04:58.446004+00:00",
   "feed_health": {
     "kalshi_rest": {
       "status": "healthy",
       "required": true,
-      "last_message_at": "2026-09-07T04:03:58.423597+00:00",
+      "last_message_at": "2026-09-07T04:04:57.518187+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -34,7 +34,7 @@
     "poly_clob": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-07T04:03:42.373610+00:00",
+      "last_message_at": "2026-09-07T04:04:40.350432+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -43,7 +43,7 @@
     "poly_data": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-07T04:03:31.067409+00:00",
+      "last_message_at": "2026-09-07T04:04:35.427440+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -70,7 +70,7 @@
     "sec": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-07T03:59:27.769242+00:00",
+      "last_message_at": "2026-09-07T04:04:27.982588+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -88,7 +88,7 @@
     "crypto_spot": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-07T04:03:56.377673+00:00",
+      "last_message_at": "2026-09-07T04:04:53.659840+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -124,7 +124,7 @@
     "bluesky": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-07T03:59:37.777200+00:00",
+      "last_message_at": "2026-09-07T04:04:38.030174+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -133,7 +133,7 @@
     "alpaca": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-07T04:03:27.376777+00:00",
+      "last_message_at": "2026-09-07T04:04:27.367016+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -153,8 +153,8 @@
       "required": false,
       "last_message_at": null,
       "latency_ms": null,
-      "error_count": 10,
-      "reconnect_count": 10,
+      "error_count": 11,
+      "reconnect_count": 11,
       "detail": "server rejected WebSocket connection: HTTP 401"
     }
   }
