@@ -78,12 +78,17 @@ from marketlab.core.instruments import (
 from marketlab.logging import get_logger
 from marketlab.settings import CONFIG_DIR, Settings
 from marketlab.storage.state import LeaderboardRow as StoreLeaderboardRow
+from marketlab.storage.state import Settlement as StoreSettlement
 
 log = get_logger(__name__)
 
 #: Concurrent Kalshi orderbook fetches. The RateLimiter still governs request rate;
 #: this only stops per-request latency from being serialised across a whole pass.
 _KALSHI_BOOK_CONCURRENCY = 8
+
+#: Markets resolved per settlement pass. Bounded so a large backlog is worked through
+#: over several cycles instead of stalling one pass.
+_SETTLEMENT_BATCH = 60
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +116,7 @@ _DEFAULT_INGEST_CFG: dict[str, Any] = {
     "max_tracked_markets": 400,
     "kalshi_book_sample": 120,
     "kalshi_broad_sweep_pages": 3,
+    "kalshi_settlement_refresh_seconds": 120,
     "min_market_volume": 0,
 }
 
@@ -404,6 +410,7 @@ class IngestOnceResult:
     kalshi_markets: int = 0
     kalshi_books: int = 0
     kalshi_trades: int = 0
+    kalshi_settlements: int = 0
     poly_markets: int = 0
     poly_books: int = 0
     poly_activity: int = 0
@@ -1050,6 +1057,83 @@ class IngestService:
             await self._ingest_kalshi_markets_once(r, max_pages=25)
             await self.clock.sleep(interval)
 
+    async def _ingest_kalshi_settlements_once(self, result: IngestOnceResult) -> None:
+        """Resolve markets we still hold positions in.
+
+        Settlement is the ONLY thing that turns an open position into realized P&L, and
+        without it the whole tournament is scientifically inert: no realized returns, no
+        Brier scores, no win rates, no calibration. It also deadlocks trading - positions
+        never clear, so strategy exposure ratchets up to its cap and every subsequent
+        order is refused.
+
+        This works from open positions rather than the market registry on purpose. The
+        registry only holds *open* markets, so a contract vanishes from it the instant it
+        closes, which is exactly when its resolution becomes knowable.
+
+        The venue's own ``result`` field is the sole authority here - never a model,
+        never a news report, never an inferred score.
+        """
+        if self.store is None:
+            return
+        try:
+            held = set(self.store.open_position_market_ids())
+            already = self.store.settled_market_ids()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("settlement_candidates_failed", error=str(exc))
+            return
+
+        pending = [cid for cid in held if cid not in already and cid.startswith("kalshi:")]
+        if not pending:
+            return
+
+        settled = 0
+        semaphore = asyncio.Semaphore(_KALSHI_BOOK_CONCURRENCY)
+
+        async def resolve(canonical_id: str) -> None:
+            nonlocal settled
+            ticker = canonical_id.split(":", 1)[1].upper()
+            async with semaphore:
+                try:
+                    raw = await self.kalshi_rest.get_market(ticker)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("settlement_fetch_failed", ticker=ticker, error=str(exc))
+                    return
+            market_raw = raw.get("market") if isinstance(raw.get("market"), dict) else raw
+            event = settlement_event_from_raw(
+                market_raw, canonical_id, Venue.KALSHI, self.clock, "kalshi_rest"
+            )
+            if event is None:
+                return  # not resolved yet; try again next pass
+            self._enqueue(event)
+            try:
+                self.store.save_settlement(
+                    StoreSettlement(
+                        canonical_id=canonical_id,
+                        venue=Venue.KALSHI,
+                        winning_side=event.winning_side,
+                        settlement_value=event.settlement_value,
+                        voided=event.voided,
+                        settled_at=event.event_time,
+                        first_seen_time=event.first_seen_time,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("settlement_persist_failed", canonical_id=canonical_id, error=str(exc))
+            settled += 1
+
+        await asyncio.gather(*(resolve(cid) for cid in pending[:_SETTLEMENT_BATCH]))
+        if settled:
+            self.health.record_message("kalshi_rest")
+            log.info("ingest_kalshi_settlements", resolved=settled, pending=len(pending))
+        result.kalshi_settlements = settled
+
+    async def _loop_kalshi_settlements(self) -> None:
+        interval = self._seconds("kalshi_settlement_refresh_seconds", 120)
+        while not self._stop.is_set():
+            r = IngestOnceResult()
+            await self._ingest_kalshi_settlements_once(r)
+            await self.clock.sleep(interval)
+
     async def _loop_kalshi_books_trades(self) -> None:
         interval = self._seconds("kalshi_book_refresh_seconds", 5)
         while not self._stop.is_set():
@@ -1259,6 +1343,7 @@ class IngestService:
         loops: list[tuple[str, Callable[[], Awaitable[None]]]] = [
             ("kalshi_markets", self._loop_kalshi_markets),
             ("kalshi_books_trades", self._loop_kalshi_books_trades),
+            ("kalshi_settlements", self._loop_kalshi_settlements),
             ("kalshi_ws", self._loop_kalshi_ws),
             ("poly_markets", self._loop_poly_markets),
             ("poly_books", self._loop_poly_books),

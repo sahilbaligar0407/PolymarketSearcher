@@ -88,7 +88,15 @@ class RecoveryService:
 
         # 2. Portfolios -- the real bankroll, never re-created.
         try:
-            experiments = store.list_experiments()
+            # Only live sleeves come back. A DEAD sleeve stays dead and a DISABLED
+            # (retired) cohort must not be resurrected into the live portfolio registry -
+            # otherwise every status report counts retired sleeves as alive, and the
+            # operator sees 776 "alive" when 388 are actually trading.
+            experiments = [
+                e
+                for e in store.list_experiments()
+                if str(getattr(e, "status", "")) not in ("DEAD", "DISABLED")
+            ]
         except Exception as exc:  # noqa: BLE001
             summary.notes.append(f"list_experiments failed: {exc}")
             log.warning("recovery_list_experiments_failed", error=str(exc))

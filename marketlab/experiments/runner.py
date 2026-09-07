@@ -182,6 +182,7 @@ class ExperimentRunner:
         book_registry: BookRegistryLike,
         ai_provider: Any | None = None,
         *,
+        portfolio_registry: Any | None = None,
         max_consecutive_failures: int = 10,
         broker_owns_portfolio: bool = True,
     ) -> None:
@@ -192,6 +193,14 @@ class ExperimentRunner:
         self.market_registry = market_registry
         self.book_registry = book_registry
         self.ai_provider = ai_provider
+        #: Shared with the broker so BOTH mutate the same Portfolio object.
+        #:
+        #: The broker looks a sleeve's portfolio up by experiment_id through its
+        #: `portfolio_provider`; this runner builds its own from the store. Without
+        #: registering ours here those are two different objects for the same sleeve:
+        #: the broker applies fills to one while the runner snapshots and settles the
+        #: other, so persisted equity and the exposure the risk gateway sees drift apart.
+        self.portfolio_registry = portfolio_registry
         self.max_consecutive_failures = max_consecutive_failures
         #: Who applies fills to the sleeve's ``Portfolio``.
         #:
@@ -344,6 +353,10 @@ class ExperimentRunner:
                     )
                 self._construction_failures[experiment.experiment_id] = f"{type(exc).__name__}: {exc}"
                 continue
+
+            if self.portfolio_registry is not None:
+                with contextlib.suppress(Exception):
+                    self.portfolio_registry.register(portfolio)
 
             saved_state = self.store.load_strategy_state(experiment.experiment_id)
             restore = getattr(strategy, "restore_state", None)

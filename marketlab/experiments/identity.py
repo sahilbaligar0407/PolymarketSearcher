@@ -37,10 +37,18 @@ from typing import Any
 
 #: Bump when marketlab's data ingestion/normalization semantics change. See module
 #: docstring for exactly what this covers.
-DATA_VERSION = "data.2026.09.04"
+# 2026-09-06: settlement ingestion added. Before this, no market ever resolved, so no
+# experiment had realized P&L and positions accumulated until the exposure cap deadlocked
+# trading. Every result produced under data.2026.09.04 measured fee and spread drag on
+# unresolved positions and nothing else - the numbers are not comparable to post-fix runs,
+# so this bump deliberately starts a new cohort rather than continuing the old sleeves.
+# The old cohort is preserved in the database, as required; it is simply closed.
+DATA_VERSION = "data.2026.09.06"
 
 #: Bump when the fill/latency/fee simulation semantics change.
-EXECUTION_MODEL_VERSION = "exec.v1"
+# 2026-09-06: positions now actually settle from the venue's authoritative result, and
+# the runner/broker share one Portfolio object rather than mutating two copies.
+EXECUTION_MODEL_VERSION = "exec.v2"
 
 #: Bump when feature computation semantics change.
 FEATURE_VERSION = "feat.v1"

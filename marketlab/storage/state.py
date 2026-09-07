@@ -718,6 +718,26 @@ class StateStore:
     # strategy internal state (crash recovery for strategy-private data)
     # ------------------------------------------------------------------
 
+    def open_position_market_ids(self) -> list[str]:
+        """Every canonical_id any sleeve still holds a non-zero position in.
+
+        The settlement poller works from this rather than from the market registry: the
+        registry only ever holds *open* markets, so a contract silently disappears from
+        it the moment it closes - which is precisely when we need to go and find out how
+        it resolved. Positions are what we actually need settled.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT canonical_id FROM positions WHERE CAST(quantity AS INTEGER) != 0"
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def settled_market_ids(self) -> set[str]:
+        """Markets already recorded as settled, so the poller does not re-fetch them."""
+        with self._lock:
+            rows = self._conn.execute("SELECT canonical_id FROM settlements").fetchall()
+        return {r[0] for r in rows}
+
     def save_strategy_state(self, experiment_id: str, key: str, value: Any) -> None:
         with self._lock, self._conn:
             self._conn.execute(

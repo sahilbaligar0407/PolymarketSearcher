@@ -344,6 +344,7 @@ class Supervisor:
                 self.market_registry,
                 self.book_registry,
                 ai_provider=self.ai_provider,
+                portfolio_registry=self.portfolio_registry,
             )
         except Exception as exc:  # noqa: BLE001
             log.error("experiment_runner_construction_failed", error=str(exc), exc_info=True)
