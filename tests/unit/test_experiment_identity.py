@@ -106,3 +106,34 @@ def test_git_commit_never_raises_and_returns_string() -> None:
 def test_git_commit_returns_nogit_for_nonexistent_repo(tmp_path) -> None:
     result = git_commit(repo_root=tmp_path)
     assert result == "nogit"
+
+
+def test_a_new_commit_does_not_start_a_new_cohort() -> None:
+    """An ordinary commit must not orphan every running sleeve.
+
+    `git_commit` belongs in the experiment identity (provenance) but not in the cohort
+    key. When it was in both, every commit - including docs-only ones - changed the
+    cohort key, so all ~400 live sleeves were abandoned and recreated at a fresh $50.
+    Three commits during one debugging session produced 1,164 experiments where there
+    should have been 388, and no sleeve ever accumulated enough forward history to be
+    promotable.
+    """
+    base = ExperimentIdentity(**_base_kwargs())
+    other_commit = dataclasses.replace(base, git_commit="deadbeefcafe")
+
+    # Same research setup, different commit -> same cohort, so the run continues.
+    assert base.cohort_key == other_commit.cohort_key
+    # ...but still a distinguishable experiment, because provenance must be preserved.
+    assert base.experiment_id != other_commit.experiment_id
+
+
+def test_a_semantic_version_bump_does_start_a_new_cohort() -> None:
+    """The designated switches still work: bumping them invalidates prior results."""
+    base = ExperimentIdentity(**_base_kwargs())
+    for field_name in ("data_version", "execution_model_version", "feature_version"):
+        changed = dataclasses.replace(base, **{field_name: "bumped.v99"})
+        assert base.cohort_key != changed.cohort_key, f"{field_name} must change the cohort"
+
+    # Strategy version and parameters are semantic too.
+    assert base.cohort_key != dataclasses.replace(base, strategy_version="9.9.9").cohort_key
+    assert base.cohort_key != dataclasses.replace(base, parameter_hash="ffffffffffff").cohort_key

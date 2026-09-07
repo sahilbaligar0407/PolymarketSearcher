@@ -33,6 +33,8 @@ ingest:
   kalshi_trades_refresh_seconds: 10
   # Polymarket is read-only intelligence.
   poly_market_refresh_seconds: 120
+  # Markets pulled per Polymarket refresh (feeds the cross-venue matcher's candidate pool).
+  poly_market_limit: 500
   poly_book_refresh_seconds: 15
   poly_leaderboard_refresh_seconds: 3600
   poly_activity_refresh_seconds: 30

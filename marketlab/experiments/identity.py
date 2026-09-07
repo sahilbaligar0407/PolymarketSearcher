@@ -185,6 +185,17 @@ class ExperimentIdentity:
         """
         fields = self._fields_for_hash()
         fields.pop("start_timestamp")
+        # `git_commit` stays in the experiment IDENTITY (it is the provenance record that
+        # makes a result reproducible) but must NOT be in the cohort key. Including it
+        # meant every commit - a docs typo, a lint fix, anything - changed the cohort key,
+        # orphaned all ~400 running sleeves and restarted each at a fresh $50. Forward
+        # testing is impossible if ordinary development resets the experiment.
+        #
+        # Semantic change is already captured deliberately and explicitly by
+        # DATA_VERSION / EXECUTION_MODEL_VERSION / FEATURE_VERSION plus the strategy
+        # version and parameter hash. Those are the designated "this invalidates prior
+        # results" switches; a commit hash is not one.
+        fields.pop("git_commit")
         return fields
 
     @property

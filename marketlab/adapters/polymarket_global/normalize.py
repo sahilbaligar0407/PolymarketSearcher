@@ -139,6 +139,65 @@ def _parse_unix_ms(value: Any) -> datetime | None:
         return None
 
 
+def _slug_tokens(raw: Mapping[str, Any]) -> list[str]:
+    """Category hints from slugs, event tickers and the question text.
+
+    Verified 2026-09-06: the live Gamma market payload carries **no ``tags`` field at
+    all**, so tag-based classification returned OTHER for every single market. That was
+    not cosmetic - the cross-venue matcher buckets candidates by category, so Kalshi's
+    `sports` and `crypto` markets looked for counterparts in buckets that were
+    permanently empty and produced zero candidate pairs. Copy-trading and cross-venue
+    (114 sleeves) could never trade as a result.
+
+    Polymarket slugs are richly informative (``cfb-lou-miss-2026-09-06``,
+    ``mlb-sf-nym-2026-09-06``), so they are the reliable signal here.
+    """
+    tokens: list[str] = []
+    for key in ("slug", "question", "title"):
+        value = raw.get(key)
+        if value:
+            tokens.append(str(value).lower())
+    for ev in raw.get("events") or []:
+        if isinstance(ev, dict):
+            for key in ("ticker", "slug", "title"):
+                if ev.get(key):
+                    tokens.append(str(ev[key]).lower())
+    return tokens
+
+
+#: Substrings that identify a category inside a slug or question. Ordered most-specific
+#: first so that e.g. "cfb" is not shadowed by a looser football match.
+_SLUG_CATEGORY_RULES: tuple[tuple[Category, tuple[str, ...]], ...] = (
+    (Category.CRYPTO, ("bitcoin", "btc", "ethereum", "eth-", "solana", "-sol-", "xrp",
+                       "dogecoin", "doge", "crypto", "altcoin")),
+    (Category.SPORTS, ("cfb-", "nfl-", "nba-", "mlb-", "nhl-", "ncaa", "epl-", "ucl-",
+                       "atp", "wta", "ufc", "-vs-", " vs. ", " vs ", "o/u", "over-under",
+                       "premier-league", "laliga", "seriea", "bundesliga", "f1-",
+                       "counter-strike", "league-of-legends", "dota", "valorant", "esports")),
+    (Category.POLITICS, ("election", "president", "senate", "congress", "governor",
+                         "primary", "nominee", "parliament", "impeach", "shutdown")),
+    (Category.ECONOMICS, ("cpi", "inflation", "fed-", "fomc", "interest-rate", "recession",
+                          "gdp", "jobs-report", "unemployment", "rate-cut", "rate-hike")),
+    (Category.WEATHER, ("temperature", "hurricane", "snowfall", "rainfall", "weather",
+                        "heat-wave", "tornado")),
+    (Category.TECH, ("openai", "gpt", "anthropic", "claude", "gemini", "llm", "ai-model",
+                     "spacex", "starship", "tesla", "apple", "nvidia", "chatgpt")),
+    (Category.FINANCE, ("s-p-500", "sp500", "nasdaq", "dow-jones", "stock", "ipo",
+                        "earnings", "gold-price", "oil-price")),
+    (Category.ENTERTAINMENT, ("oscar", "grammy", "emmy", "box-office", "rotten-tomatoes",
+                              "album", "movie", "billboard")),
+)
+
+
+def _category_from_slug(raw: Mapping[str, Any]) -> Category:
+    tokens = _slug_tokens(raw)
+    for category, needles in _SLUG_CATEGORY_RULES:
+        for token in tokens:
+            if any(n in token for n in needles):
+                return category
+    return Category.OTHER
+
+
 def _extract_tags(raw: Mapping[str, Any]) -> list[str]:
     tags: list[str] = []
     for t in raw.get("tags") or []:
@@ -248,6 +307,9 @@ def normalize_market(raw: Mapping[str, Any], *, category_hint: Category | None =
 
     canonical_id = f"poly:{condition_id or slug}"
     category = category_hint or _category_from_tags(_extract_tags(raw))
+    if category is Category.OTHER:
+        # Live payloads carry no tags; fall back to slug/question inference.
+        category = _category_from_slug(raw)
     status = _market_status(active, closed, accepting)
     yes_symbol = outcomes[0] if outcomes else "Yes"
     no_symbol = outcomes[1] if len(outcomes) > 1 else "No"

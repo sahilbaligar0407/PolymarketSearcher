@@ -279,5 +279,12 @@ polymarket_mirror:
   enabled: true
   execution: false
   track_categories: [crypto, sports, politics, economics, finance, weather, tech]
-  max_tracked_markets: 300
-  min_volume_24h: 1000
+  # Widened from 100. The cross-venue and copy families can only act on a CERTIFIED
+  # equivalent Kalshi contract, and with a 100-market mirror the matcher evaluated 112
+  # candidate pairs and correctly approved none of them - the Kalshi BTC contracts are
+  # terminal ("price at 5pm") while the sampled Polymarket ones were barrier-touch
+  # ("will it reach X"), which are genuinely different bets.
+  #
+  # The fix is more surface area to find a true equivalent in, never a laxer matcher.
+  max_tracked_markets: 500
+  min_volume_24h: 500

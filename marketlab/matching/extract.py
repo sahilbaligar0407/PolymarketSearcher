@@ -196,6 +196,15 @@ def _extract_entities(text: str) -> frozenset[str]:
         "AM", "PM", "EST", "EDT", "CST", "CDT", "MST", "MDT", "PST", "PDT",
         "NFL", "NBA", "MLB", "NHL", "CPI", "BLS", "GDP", "SEC", "FDA", "CDC",
         "NWS", "FOMC", "AP", "Q1", "Q2", "Q3", "Q4",
+        # Index/oracle and settlement-source acronyms. These name the *authority* that
+        # resolves a market, not its subject, and they are already compared separately
+        # via `resolution_authority` (where a Coinbase-vs-Binance oracle difference is
+        # correctly disqualifying). Left in the subject set they poisoned every
+        # cross-venue comparison: Kalshi states its index in the rules text ("BRTI",
+        # "CF Benchmarks") and Polymarket does not, so all 112 real candidate pairs were
+        # rejected for "subject entities differ" before any genuine comparison happened.
+        "BRTI", "BRR", "CF", "RTI", "CME", "ICE", "NYSE", "CBOE", "LSE",
+        "TBD", "TBA", "N/A", "ID", "II", "III", "IV", "VS", "OU", "AND", "OR", "THE",
     }
     for m in re.finditer(r"\b[A-Z]{2,5}\b", text):
         token = m.group(0)

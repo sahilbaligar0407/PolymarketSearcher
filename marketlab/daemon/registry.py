@@ -84,6 +84,10 @@ def _market_matches_universe(market: NormalizedMarket, udef: Mapping[str, Any]) 
     return False
 
 
+#: The registry holds the Kalshi tracked set plus the Polymarket mirror alongside it.
+_VENUE_HEADROOM_FACTOR = 2
+
+
 class MarketRegistry:
     """canonical_id -> latest :class:`NormalizedMarket`, bounded to the most recently
     touched ``max_tracked`` markets (an LRU by ``upsert`` recency).
@@ -95,7 +99,12 @@ class MarketRegistry:
     """
 
     def __init__(self, max_tracked: int = 400, universes_cfg: Mapping[str, Any] | None = None) -> None:
-        self._max_tracked = max(1, max_tracked)
+        # Headroom for the read-only Polymarket mirror. `max_tracked` is the KALSHI
+        # tracked-set size, but Polymarket markets are upserted into this same registry;
+        # sizing the LRU to exactly max_tracked meant each venue's refresh evicted the
+        # other's markets, so a strategy could look up a market that had just vanished.
+        self._max_tracked = max(1, int(max_tracked * _VENUE_HEADROOM_FACTOR))
+        self._kalshi_budget = max(1, max_tracked)
         self._markets: OrderedDict[str, NormalizedMarket] = OrderedDict()
         self._lock = threading.RLock()
         self._universes_cfg: Mapping[str, Any] = universes_cfg or {}

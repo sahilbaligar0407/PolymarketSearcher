@@ -99,10 +99,23 @@ def test_normalize_market_closed_status() -> None:
     assert market.status == MarketStatus.CLOSED
 
 
-def test_normalize_market_category_defaults_to_other_without_tags() -> None:
-    raw = _gamma_market(events=[])
-    market = normalize_market(raw)
-    assert market.category == Category.OTHER
+def test_category_falls_back_to_slug_inference_when_tags_are_absent() -> None:
+    """Live Gamma payloads carry no `tags` field at all (verified 2026-09-06).
+
+    Classifying purely on tags therefore returned OTHER for 100% of real markets, which
+    silently starved the cross-venue matcher: it buckets candidates by category, so every
+    Kalshi sports/crypto market searched an empty bucket and produced zero candidate
+    pairs. The slug is the reliable signal on this venue.
+    """
+    sports = normalize_market(_gamma_market(events=[], slug="cfb-lou-miss-2026-09-06"))
+    assert sports.category == Category.SPORTS
+
+    crypto = normalize_market(_gamma_market(events=[], slug="will-bitcoin-hit-100k"))
+    assert crypto.category == Category.CRYPTO
+
+    # Genuinely unclassifiable input still falls through to OTHER rather than guessing.
+    unknown = normalize_market(_gamma_market(events=[], slug="zzz-unclassifiable-thing"))
+    assert unknown.category == Category.OTHER
 
 
 def test_book_folding_yes_and_no_token_agree() -> None:

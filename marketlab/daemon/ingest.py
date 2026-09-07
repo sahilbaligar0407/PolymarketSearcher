@@ -117,6 +117,8 @@ _DEFAULT_INGEST_CFG: dict[str, Any] = {
     "kalshi_book_sample": 120,
     "kalshi_broad_sweep_pages": 3,
     "kalshi_settlement_refresh_seconds": 120,
+    "market_match_refresh_seconds": 900,
+    "poly_market_limit": 500,
     "min_market_volume": 0,
 }
 
@@ -411,6 +413,7 @@ class IngestOnceResult:
     kalshi_books: int = 0
     kalshi_trades: int = 0
     kalshi_settlements: int = 0
+    market_matches: int = 0
     poly_markets: int = 0
     poly_books: int = 0
     poly_activity: int = 0
@@ -830,8 +833,12 @@ class IngestService:
         # nobody trades is worth far less to the tournament than a book for one that is
         # actively quoting - open interest is the better proxy here than volume, since a
         # freshly listed hourly contract can show heavy volume and no resting depth.
+        # Kalshi only. The registry deliberately holds the Polymarket mirror alongside
+        # the Kalshi tracked set, and without this filter the most liquid Polymarket
+        # markets crowd out the sample and are then requested from Kalshi's orderbook
+        # endpoint under a `poly:` id, which fails for every one of them.
         ranked = sorted(
-            self.markets.all(),
+            (m for m in self.markets.all() if m.venue is Venue.KALSHI),
             key=lambda m: (m.open_interest, m.volume),
             reverse=True,
         )
@@ -889,7 +896,9 @@ class IngestService:
         result.kalshi_books = books_ok
         result.kalshi_trades = trades_ok
 
-    async def _ingest_poly_markets_once(self, result: IngestOnceResult, *, limit: int = 150) -> None:
+    async def _ingest_poly_markets_once(self, result: IngestOnceResult, *, limit: int | None = None) -> None:
+        if limit is None:
+            limit = int(self._cfg.get("poly_market_limit", 500))
         try:
             raw_list = await self.poly_gamma.get_markets(limit=limit, closed=False, order="volume24hr", ascending=False)
             normalized: list[NormalizedMarket] = []
@@ -1127,6 +1136,68 @@ class IngestService:
             log.info("ingest_kalshi_settlements", resolved=settled, pending=len(pending))
         result.kalshi_settlements = settled
 
+    async def _ingest_market_matches_once(self, result: IngestOnceResult) -> None:
+        """Link Kalshi contracts to equivalent Polymarket markets.
+
+        Without this the copy-trading and cross-venue families are structurally unable to
+        trade: both require an APPROVED match before acting, because a Polymarket signal
+        is only actionable once we know which Kalshi contract is the identical bet. The
+        matcher existed and was tested but was never invoked by the daemon, which left
+        114 of 388 sleeves permanently idle.
+
+        Approval remains the deterministic resolution-rule validator's decision alone -
+        this loop only feeds it candidates and persists what it certifies.
+        """
+        if self.store is None:
+            return
+        try:
+            from marketlab.matching.cross_venue import CrossVenueMatcher, approved_for_automation
+        except Exception as exc:  # noqa: BLE001
+            log.warning("matcher_unavailable", error=str(exc))
+            return
+
+        # Read the full catalogue from the store, not the registry. The registry is a
+        # bounded LRU hot-cache shared by both venues, so whichever venue refreshed last
+        # evicts the other; matching needs to see every market we know about, and it runs
+        # rarely enough (15 min) that a store read is cheap.
+        try:
+            kalshi = self.store.list_markets(venue=Venue.KALSHI.value, status="open")
+            poly = self.store.list_markets(venue=Venue.POLY_GLOBAL.value, status="open")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("match_catalogue_read_failed", error=str(exc))
+            return
+        if not kalshi or not poly:
+            return
+        try:
+            matcher = CrossVenueMatcher(clock=self.clock)
+            matches = await matcher.match(kalshi, poly)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("market_matching_failed", error=str(exc))
+            return
+
+        saved = approved = 0
+        for m in matches:
+            try:
+                self.store.save_match(m)
+                saved += 1
+                if approved_for_automation(m):
+                    approved += 1
+            except Exception as exc:  # noqa: BLE001
+                log.debug("match_persist_failed", error=str(exc))
+        if saved:
+            log.info(
+                "ingest_market_matches",
+                kalshi=len(kalshi), poly=len(poly), saved=saved, approved=approved,
+            )
+        result.market_matches = saved
+
+    async def _loop_market_matches(self) -> None:
+        interval = self._seconds("market_match_refresh_seconds", 900)
+        while not self._stop.is_set():
+            r = IngestOnceResult()
+            await self._ingest_market_matches_once(r)
+            await self.clock.sleep(interval)
+
     async def _loop_kalshi_settlements(self) -> None:
         interval = self._seconds("kalshi_settlement_refresh_seconds", 120)
         while not self._stop.is_set():
@@ -1344,6 +1415,7 @@ class IngestService:
             ("kalshi_markets", self._loop_kalshi_markets),
             ("kalshi_books_trades", self._loop_kalshi_books_trades),
             ("kalshi_settlements", self._loop_kalshi_settlements),
+            ("market_matches", self._loop_market_matches),
             ("kalshi_ws", self._loop_kalshi_ws),
             ("poly_markets", self._loop_poly_markets),
             ("poly_books", self._loop_poly_books),
