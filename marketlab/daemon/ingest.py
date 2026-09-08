@@ -119,6 +119,7 @@ _DEFAULT_INGEST_CFG: dict[str, Any] = {
     "kalshi_settlement_refresh_seconds": 120,
     "market_match_refresh_seconds": 900,
     "poly_market_limit": 500,
+    "kalshi_category_series_per_category": 30,
     "min_market_volume": 0,
 }
 
@@ -537,6 +538,8 @@ class IngestService:
         #: _build_misc_adapters so `doctor` can report a wiring bug as a bug
         #: rather than as a missing feature.
         self._adapter_build_errors: dict[str, str] = {}
+        #: Kalshi category label -> series tickers, cached for the process lifetime.
+        self._category_series_cache: dict[str, list[str]] = {}
         self._misc: dict[str, Adapter] = self._build_misc_adapters()
 
         self.health.register("kalshi_rest", required=True, stale_after_seconds=180.0)
@@ -769,7 +772,18 @@ class IngestService:
             if series_allowlist:
                 raw_rows.extend(await self._fetch_kalshi_series_markets(sorted(series_allowlist)))
 
-            # 2. Broad sweep, for the category-driven universes (politics, elections,
+            # 2. Category-driven universes (politics, elections, companies, mentions)
+            #    name no explicit series, so their series are discovered from the series
+            #    catalogue by Kalshi's own category label. Without this they resolved to
+            #    ZERO markets - `/markets` has no category filter and its default ordering
+            #    is ~97% KXMVE parlays, so the shallow sweep below never reaches them and
+            #    news_probability / public_statement had nothing to trade.
+            if _categories:
+                cat_series = await self._discover_category_series(_categories)
+                if cat_series:
+                    raw_rows.extend(await self._fetch_kalshi_series_markets(cat_series))
+
+            # 3. Broad sweep, for the category-driven universes (politics, elections,
             #    companies, mentions) that name no explicit series. Deliberately shallow:
             #    `/markets?status=open` is ~97% zero-volume KXMVE parlays
             #    (docs/FINDINGS.md #8), so paging deep costs a lot of CPU and returns
@@ -1065,6 +1079,42 @@ class IngestService:
             r = IngestOnceResult()
             await self._ingest_kalshi_markets_once(r, max_pages=25)
             await self.clock.sleep(interval)
+
+    async def _discover_category_series(self, categories: set[Category]) -> list[str]:
+        """Series tickers for the Kalshi categories our universes ask for, bounded.
+
+        Kalshi lists thousands of series per category (2,303 Politics alone), so this
+        takes a bounded slice per category; the volume/liquidity filters in
+        ``select_tracked_markets`` decide which of the resulting markets are worth
+        tracking. Cached for the process lifetime - the catalogue changes slowly and this
+        runs on the market-refresh cadence.
+        """
+        per = int(self._cfg.get("kalshi_category_series_per_category", 30))
+        wanted = {
+            label
+            for label, cat in KALSHI_CATEGORY_LABEL_MAP.items()
+            if cat in categories
+        }
+        out: list[str] = []
+        for label in sorted(wanted):
+            cached = self._category_series_cache.get(label)
+            if cached is None:
+                try:
+                    payload = await self.kalshi_rest.list_series(
+                        category=label.title(), limit=200
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("category_series_failed", category=label, error=str(exc))
+                    self._category_series_cache[label] = []
+                    continue
+                cached = [
+                    str(x.get("ticker"))
+                    for x in (payload.get("series") or [])
+                    if x.get("ticker")
+                ]
+                self._category_series_cache[label] = cached
+            out.extend(cached[:per])
+        return out
 
     async def _ingest_kalshi_settlements_once(self, result: IngestOnceResult) -> None:
         """Resolve markets we still hold positions in.

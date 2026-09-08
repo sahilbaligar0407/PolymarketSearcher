@@ -28,7 +28,17 @@ universes:
   btc_15m:
     label: BTC 15-minute directional
     category: crypto
-    available: true
+    # DISABLED 2026-09-08 on evidence, not opinion. Over 25h and 977 resolved trades it
+    # won 50.7% - a coin flip on a binary contract - and paid $31.38 in fees for the
+    # privilege, netting -$37.20. The same underlying on btc_1h won 59.7%.
+    #
+    # This is the PRD's own hypothesis confirmed: the 15-minute horizon is too
+    # latency-sensitive for a home setup. Recorded as a finding rather than deleted, and
+    # re-enable it the day the execution path gets materially faster.
+    available: false
+    unavailable_reason: >
+      Measured 50.7% win rate over 977 resolved trades (coin flip) with $31.38 of fees,
+      net -$37.20. Latency-infeasible on this hardware; btc_1h is the viable horizon.
     kalshi_series: [KXBTC15M]
     reference_symbols: [BTC-USD]
     horizon_seconds: 900

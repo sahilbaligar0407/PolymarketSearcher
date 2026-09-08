@@ -203,6 +203,24 @@ class KalshiRestAdapter(Adapter):
     async def get_series(self, series_ticker: str) -> dict[str, Any]:
         return await self._get(f"/series/{series_ticker}")
 
+    async def list_series(
+        self, category: str | None = None, limit: int = 200, cursor: str | None = None
+    ) -> dict[str, Any]:
+        """The series catalogue, optionally filtered by Kalshi's own category label.
+
+        This is how category-driven universes (Politics, Companies, Mentions) are
+        discovered. `/markets` has no category filter and its default ordering is ~97%
+        zero-volume KXMVE parlays, so paging it shallowly finds none of these series and
+        paging it deeply stalls the event loop. Asking the series catalogue by category
+        and then fetching those series' markets is both targeted and cheap.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if category:
+            params["category"] = category
+        if cursor:
+            params["cursor"] = cursor
+        return await self._get("/series", params=params)
+
     # ------------------------------------------------------------------
     # Public: order book / trades / candlesticks
     # ------------------------------------------------------------------
