@@ -168,11 +168,26 @@ class RiskGateway:
                 f"daily P&L {daily_pnl} breaches daily_loss_pause_pct "
                 f"({cfg.daily_loss_pause_pct}); only reducing orders are allowed",
             )
-        if not reducing and portfolio.max_drawdown >= cfg.total_drawdown_pause_pct:
+        # Measured as loss of CAPITAL, not peak-to-trough. `max_drawdown` on Portfolio is
+        # a high-water-mark measure, and pausing on it permanently halted sleeves that
+        # were actually in profit: one sat at $56.57 on a $50 bankroll - up 13% - and was
+        # frozen because it had once been higher. The PRD states this limit alongside
+        # `initial_capital` and `daily_loss_pause_pct`, i.e. as a capital-preservation
+        # rule, and permanently retiring a profitable experiment is the opposite of that.
+        #
+        # Peak-to-trough drawdown is still recorded and still reported - it is a headline
+        # research metric - it just is not what trips the trading halt.
+        capital = cfg.initial_capital
+        equity = portfolio.equity()
+        capital_drawdown = (
+            (capital - equity) / capital if capital > ZERO and equity < capital else ZERO
+        )
+        if not reducing and capital_drawdown >= cfg.total_drawdown_pause_pct:
             return self._reject(
                 "drawdown_pause",
                 RejectReason.RISK_GATE,
-                f"drawdown {portfolio.max_drawdown} breaches total_drawdown_pause_pct "
+                f"equity {equity} is {capital_drawdown:.1%} below initial capital "
+                f"{capital}, breaching total_drawdown_pause_pct "
                 f"({cfg.total_drawdown_pause_pct}); only reducing orders are allowed",
             )
 

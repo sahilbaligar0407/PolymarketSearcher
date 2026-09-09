@@ -105,8 +105,17 @@ def test_polymarket_global_hard_blocked_even_with_permissive_config():
 
 
 def test_insufficient_cash_rejected():
+    """Low cash while fully invested - equity is intact, so only the cash check bites.
+
+    The portfolio holds a position worth roughly its whole bankroll, which keeps equity
+    near initial capital: without that, the capital-drawdown pause would fire first and
+    mask the condition under test.
+    """
     gw = _gateway()
     portfolio = _portfolio(cash=Decimal("1.00"))
+    portfolio.positions[Portfolio.key("other-mkt", Side.YES)] = Position(
+        canonical_id="other-mkt", side=Side.YES, quantity=100, average_price=Decimal("0.49")
+    )
     intent = _intent(quantity=10, limit_price=Decimal("0.50"))  # cost 5.00 > cash 1.00
     decision = gw.evaluate(intent, portfolio, _market(), _book(), {}, {}, Decimal(0))
     assert not decision.approved
@@ -222,8 +231,15 @@ def test_daily_loss_pause_blocks_increasing_but_allows_reducing():
 
 
 def test_drawdown_pause_blocks_increasing_but_allows_reducing():
+    """The pause triggers on CAPITAL loss, not on peak-to-trough drawdown.
+
+    A high-water-mark measure permanently froze sleeves that were in profit - one sat at
+    $56.57 on a $50 bankroll and was halted because it had once been higher. Here equity
+    is genuinely 25% below the $50 starting capital, which is what the limit is for.
+    """
     gw = _gateway(total_drawdown_pause_pct=Decimal("0.20"))
-    portfolio = _portfolio()
+    portfolio = _portfolio(cash=Decimal("37.50"))
+    # Peak-to-trough is still recorded; it just no longer drives the halt.
     portfolio.max_drawdown = Decimal("0.25")
 
     increasing = _intent(action=Action.BUY, quantity=1, limit_price=Decimal("0.50"))
@@ -237,6 +253,16 @@ def test_drawdown_pause_blocks_increasing_but_allows_reducing():
     reducing = _intent(action=Action.SELL, quantity=5, limit_price=Decimal("0.40"))
     decision2 = gw.evaluate(reducing, portfolio, _market(), _book(), {}, {}, Decimal(0))
     assert decision2.approved
+
+
+def test_a_profitable_sleeve_is_never_drawdown_paused():
+    """Regression: being up on the bankroll must never trip a capital-loss halt."""
+    gw = _gateway(total_drawdown_pause_pct=Decimal("0.20"))
+    portfolio = _portfolio(cash=Decimal("56.57"))   # up 13% on a $50 sleeve
+    portfolio.max_drawdown = Decimal("0.27")        # but well off its own peak
+    intent = _intent(action=Action.BUY, quantity=1, limit_price=Decimal("0.50"))
+    decision = gw.evaluate(intent, portfolio, _market(), _book(), {}, {}, Decimal(0))
+    assert decision.approved, decision.detail
 
 
 # ---------------------------------------------------------------------------

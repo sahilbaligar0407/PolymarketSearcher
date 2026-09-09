@@ -613,3 +613,46 @@ class TestKalshiLiveBrokerPreconditions:
         with pytest.raises(LiveTradingBlocked):
             await broker.submit(_intent())
         assert adapter.calls == []
+
+
+async def test_daily_loss_pause_resets_on_the_next_day(tmp_path) -> None:
+    """The daily-loss pause must be daily, not permanent.
+
+    `_daily_pnl` previously returned CUMULATIVE P&L, so any sleeve that ever fell 10%
+    below its starting bankroll was paused forever. Measured effect in production: 178,000
+    of 178,318 orders in one 18-hour window refused with "daily P&L breaches
+    daily_loss_pause_pct", and fill volume fell roughly eighteen-fold.
+
+    The pause exists so the system can be diagnosed rather than spend the rest of the
+    bankroll in a known-broken state - which requires that it reset.
+    """
+    from datetime import timedelta
+
+    clock = SimulatedClock(TS)
+    portfolio = _portfolio(experiment_id="EXP_DAILY")
+    broker = _make_broker(
+        clock=clock,
+        market_provider=lambda cid: _market(),
+        book_provider=lambda cid: _book(),
+        portfolio_provider=lambda eid: portfolio,
+    )
+
+    # Put the sleeve well past the 10% daily-loss threshold on day one.
+    portfolio.realized_pnl = Decimal("-8.00")
+    portfolio.cash = Decimal("42.00")
+
+    day_one = broker._daily_pnl(portfolio)
+    assert day_one == Decimal(0), "first observation of a day is the day's own baseline"
+
+    # Lose more within the same day -> the pause must engage.
+    portfolio.realized_pnl = Decimal("-14.00")
+    assert broker._daily_pnl(portfolio) == Decimal("-6.00")
+
+    # Roll to the next UTC day: the day's loss resets even though cumulative P&L is
+    # still deeply negative.
+    clock.set(clock.now() + timedelta(days=1))
+    assert broker._daily_pnl(portfolio) == Decimal(0), (
+        "a new day must start from zero, otherwise the pause is permanent"
+    )
+    # ...and cumulative P&L is untouched: the sleeve's history is not rewritten.
+    assert portfolio.realized_pnl == Decimal("-14.00")

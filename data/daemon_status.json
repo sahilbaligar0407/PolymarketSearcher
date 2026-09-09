@@ -1,22 +1,22 @@
 {
-  "pid": 19204,
+  "pid": 11328,
   "mode": "PAPER",
-  "started_at": "2026-09-08T05:21:55.141038+00:00",
-  "uptime_seconds": 273.1,
-  "events_processed": 6361,
-  "markets_tracked": 503,
+  "started_at": "2026-09-09T00:01:47.048295+00:00",
+  "uptime_seconds": 306.0,
+  "events_processed": 6892,
+  "markets_tracked": 500,
   "sleeves_alive": 377,
   "sleeves_dead": 0,
-  "orders_submitted": 740,
+  "orders_submitted": 1208,
   "orders_blocked": 0,
   "trading_allowed": true,
   "trading_detail": "",
-  "last_heartbeat": "2026-09-08T05:26:28.202204+00:00",
+  "last_heartbeat": "2026-09-09T00:06:53.066519+00:00",
   "feed_health": {
     "kalshi_rest": {
       "status": "healthy",
       "required": true,
-      "last_message_at": "2026-09-08T05:26:28.114709+00:00",
+      "last_message_at": "2026-09-09T00:06:48.603168+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -25,7 +25,7 @@
     "poly_gamma": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-08T05:25:59.546159+00:00",
+      "last_message_at": "2026-09-09T00:05:54.211172+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -34,7 +34,7 @@
     "poly_clob": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-08T05:26:17.440225+00:00",
+      "last_message_at": "2026-09-09T00:06:42.906746+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -43,7 +43,7 @@
     "poly_data": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-08T05:26:18.387166+00:00",
+      "last_message_at": "2026-09-09T00:06:43.403564+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -52,7 +52,7 @@
     "poly_leaderboard": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-08T05:22:00.970506+00:00",
+      "last_message_at": "2026-09-09T00:01:55.416212+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -70,7 +70,7 @@
     "sec": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-08T05:21:59.554496+00:00",
+      "last_message_at": "2026-09-09T00:01:53.764285+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -79,7 +79,7 @@
     "gdelt": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-08T05:22:19.066731+00:00",
+      "last_message_at": "2026-09-09T00:02:54.577982+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -88,7 +88,7 @@
     "crypto_spot": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-08T05:26:23.091407+00:00",
+      "last_message_at": "2026-09-09T00:06:51.364753+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -97,7 +97,7 @@
     "weather_nws": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-08T05:21:59.695559+00:00",
+      "last_message_at": "2026-09-09T00:01:54.602390+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -115,7 +115,7 @@
     "x": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-08T05:21:58.094398+00:00",
+      "last_message_at": "2026-09-09T00:01:53.018972+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -124,7 +124,7 @@
     "bluesky": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-08T05:22:08.697662+00:00",
+      "last_message_at": "2026-09-09T00:02:03.756601+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -133,7 +133,7 @@
     "alpaca": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-08T05:25:58.161464+00:00",
+      "last_message_at": "2026-09-09T00:06:53.065967+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,
@@ -142,7 +142,7 @@
     "sports_odds": {
       "status": "healthy",
       "required": false,
-      "last_message_at": "2026-09-08T05:21:58.174892+00:00",
+      "last_message_at": "2026-09-09T00:01:53.044456+00:00",
       "latency_ms": null,
       "error_count": 0,
       "reconnect_count": 0,

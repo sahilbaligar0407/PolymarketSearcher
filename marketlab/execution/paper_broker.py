@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Decimal
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from marketlab.clock import Clock
 from marketlab.core.broker import Broker, Mode
@@ -150,6 +150,9 @@ class PaperBroker(Broker):
         self.risk_gateway = risk_gateway
         self.settings = settings
         self.store = store
+        #: experiment_id -> (UTC date, cumulative P&L at the start of that date). Lets
+        #: _daily_pnl report a genuinely daily figure so the daily-loss pause resets.
+        self._daily_baseline: dict[str, tuple[Any, Decimal | None]] = {}
 
         self._orders: dict[str, Order] = {}
         self._resting: dict[str, OrderState] = {}
@@ -217,10 +220,28 @@ class PaperBroker(Broker):
         return {market.event_id: portfolio.exposure()}
 
     def _daily_pnl(self, portfolio: Portfolio) -> Decimal:
-        # Portfolio carries no start-of-day snapshot, so "daily" is approximated here as
-        # cumulative P&L to date for the sleeve. A real day boundary needs a scheduler in
-        # the runner/daemon that snapshots equity at UTC midnight and hands the delta in.
-        return portfolio.realized_pnl + portfolio.unrealized_pnl()
+        """P&L accrued since the start of the current UTC day, for this sleeve.
+
+        This used to return *cumulative* P&L, which quietly turned the daily-loss pause
+        into a PERMANENT one: any sleeve that ever dropped 10% below its starting bankroll
+        was paused forever rather than until the next day. Measured effect - 178,000 of
+        178,318 orders in one 18-hour window were refused with "daily P&L breaches
+        daily_loss_pause_pct", and fill volume collapsed roughly eighteen-fold.
+
+        The PRD's intent is explicit: a daily pause exists so the system can stop and be
+        diagnosed instead of spending the rest of the bankroll in a state we already know
+        is broken. That only works if it resets.
+        """
+        today = self.clock.now().date()
+        pnl_now = portfolio.realized_pnl + portfolio.unrealized_pnl()
+        baseline_day, baseline_pnl = self._daily_baseline.get(
+            portfolio.experiment_id, (None, None)
+        )
+        if baseline_day != today:
+            # First order seen for this sleeve today: today's P&L starts at zero from here.
+            self._daily_baseline[portfolio.experiment_id] = (today, pnl_now)
+            return Decimal(0)
+        return pnl_now - (baseline_pnl or Decimal(0))
 
     def _track_experiment(self, canonical_id: str, experiment_id: str) -> None:
         self._experiments_by_market.setdefault(canonical_id, set()).add(experiment_id)
