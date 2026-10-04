@@ -76,8 +76,23 @@ def parse_btc_strike(ticker: str, title: str = "") -> Decimal | None:
     return None
 
 
-def classify_measurement(title: str, description: str = "") -> str | None:
+#: Kalshi series whose structure fixes the measurement, regardless of wording. Every
+#: KXBTCD-...-T<strike> contract settles on "the 60-second BRTI average before <time> is
+#: above <strike> at <time>" - a terminal question. The event title ("Bitcoin price on
+#: Oct 9, 2026?") says nothing either way, and the rules text contains "before", so a
+#: keyword pass over it would wrongly read barrier. Measured: 1,381 KXBTCD contracts
+#: abstained for a week on exactly that.
+_TERMINAL_TICKER_RE = re.compile(r"^KXBTCD-[0-9A-Z]+-T[\d.]+$")
+_BARRIER_SERIES = ("KXBTCMAX", "KXBTCMIN")
+
+
+def classify_measurement(title: str, description: str = "", ticker: str = "") -> str | None:
     """``'terminal'`` | ``'barrier_touch'`` | ``None`` (ambiguous -> caller must abstain)."""
+    upper = (ticker or "").upper()
+    if _TERMINAL_TICKER_RE.match(upper):
+        return "terminal"
+    if upper.startswith(_BARRIER_SERIES):
+        return "barrier_touch"
     lowered = f"{title}\n{description}".lower()
     if any(k in lowered for k in _BARRIER_KEYWORDS):
         return "barrier_touch"
@@ -98,7 +113,7 @@ class BtcEventStrategy(BaseStrategy):
     """Prices BTC threshold contracts against a driftless-GBM model of spot."""
 
     name = "btc_event"
-    version = "1.0.0"
+    version = "1.1.0"
     evidence_class = "B"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
@@ -142,7 +157,7 @@ class BtcEventStrategy(BaseStrategy):
             return
 
         now = self.now()
-        measurement = classify_measurement(market.title, market.description)
+        measurement = classify_measurement(market.title, market.description, market.venue_market_id)
         if measurement is None:
             self.forecast(
                 ProbabilityForecast(
@@ -198,7 +213,7 @@ class BtcEventStrategy(BaseStrategy):
         else:
             p_above = gbm_barrier_touch_probability(float(spot), float(strike), sigma, seconds_remaining)
 
-        below = is_below_threshold_contract(market.title)
+        below = is_below_threshold_contract(f"{market.title} {market.description}")
         p_yes = (1.0 - p_above) if below else p_above
         model_probability = clamp_probability(Decimal(str(round(p_yes, 6))))
 

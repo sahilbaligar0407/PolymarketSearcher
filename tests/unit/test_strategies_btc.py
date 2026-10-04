@@ -154,3 +154,16 @@ def test_terminal_variant_does_not_trade_barrier_worded_market() -> None:
     # so no abstain forecast either, just silence.
     assert strat.drain_forecasts() == []
     assert strat.generate_intents() == []
+
+
+
+def test_kalshi_daily_threshold_series_is_terminal_by_structure() -> None:
+    from marketlab.strategies.btc_event import classify_measurement
+
+    # The event title is uninformative and the rules say "before 5 PM", which a keyword
+    # pass would misread as a barrier. The series structure settles it.
+    assert classify_measurement("Bitcoin price on Oct 9, 2026?", "$87,000 or above",
+                                "KXBTCD-26OCT0917-T86999.99") == "terminal"
+    assert classify_measurement("Bitcoin price range on Sep 4, 2026?", "$79,700 to 79,799.99",
+                                "KXBTC-26SEP0419-B79750") is None
+    assert classify_measurement("Bitcoin yearly high", "", "KXBTCMAXY-26-T150000") == "barrier_touch"
