@@ -67,6 +67,28 @@ def forecast_to_threshold_probability(
     raise ValueError(f"unsupported comparator: {comparator!r}")
 
 
+_TICKER_BUCKET_RE = re.compile(r"-B(?P<mid>-?\d+(?:\.\d+)?)$")
+
+
+def parse_temp_bucket(ticker: str) -> Decimal | None:
+    """Midpoint of a Kalshi range bucket: ``KXHIGHNY-26OCT03-B68.5`` is "68-69 F"."""
+    m = _TICKER_BUCKET_RE.search((ticker or "").upper())
+    return Decimal(m.group("mid")) if m else None
+
+
+def forecast_to_bucket_probability(forecast_high_f: float, mid_f: float, sigma_f: float) -> float:
+    """``P(reported high is one of the bucket's two whole degrees)``.
+
+    A ``-B68.5`` bucket covers reported highs of 68 and 69. Highs are reported in whole
+    degrees, so with a continuity correction the bucket is [mid - 1, mid + 1).
+    """
+    if sigma_f <= 0:
+        raise ValueError("sigma_f must be positive")
+    upper = normal_cdf((mid_f + 1.0 - forecast_high_f) / sigma_f)
+    lower = normal_cdf((mid_f - 1.0 - forecast_high_f) / sigma_f)
+    return max(0.0, upper - lower)
+
+
 def parse_temp_threshold(ticker: str, title: str = "") -> Decimal | None:
     m = _TICKER_THRESHOLD_RE.search(ticker or "")
     if m:
@@ -95,7 +117,7 @@ class WeatherForecastStrategy(BaseStrategy):
     """Prices Kalshi weather-threshold contracts against the latest NWS forecast."""
 
     name = "weather_forecast"
-    version = "1.0.0"
+    version = "1.1.0"
     evidence_class = "B"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
@@ -167,20 +189,30 @@ class WeatherForecastStrategy(BaseStrategy):
         if forecast_state is None or forecast_state["latest"] is None:
             return
 
-        threshold = parse_temp_threshold(market.venue_market_id, market.title)
-        if threshold is None:
-            return
-        below = is_below_threshold_contract(market.title)
-        comparator = "<=" if below else ">="
-
         base_sigma = float(self.param("forecast_sigma_f", DEFAULT_FORECAST_SIGMA_F))
         history: RollingWindow = forecast_state["history"]
         ensemble_std = history.std() or 0.0
         sigma_effective = base_sigma + ensemble_std
 
-        p_yes = forecast_to_threshold_probability(
-            float(forecast_state["latest"]), float(threshold), sigma_effective, comparator
-        )
+        # Most Kalshi daily-high markets are two-degree range buckets ("-B68.5" = 68-69),
+        # not thresholds. Pricing a bucket as ">= 69" answers a different question, so a
+        # bucket gets its own probability and anything else must be an explicit "-T".
+        bucket_mid = parse_temp_bucket(market.venue_market_id)
+        if bucket_mid is not None:
+            threshold = bucket_mid
+            comparator = "in_bucket"
+            p_yes = forecast_to_bucket_probability(float(forecast_state["latest"]), float(bucket_mid), sigma_effective)
+        else:
+            if _TICKER_THRESHOLD_RE.search(market.venue_market_id or "") is None:
+                return  # neither a bucket nor an explicit threshold: do not guess
+            threshold = parse_temp_threshold(market.venue_market_id, market.title)
+            if threshold is None:
+                return
+            below = is_below_threshold_contract(f"{market.title} {market.description}")
+            comparator = "<=" if below else ">="
+            p_yes = forecast_to_threshold_probability(
+                float(forecast_state["latest"]), float(threshold), sigma_effective, comparator
+            )
         model_probability = clamp_probability(Decimal(str(round(p_yes, 6))))
 
         features: dict[str, Any] = {

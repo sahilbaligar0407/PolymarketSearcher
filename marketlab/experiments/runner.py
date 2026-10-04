@@ -295,6 +295,12 @@ class ExperimentRunner:
             ai_params = self._ai_params(variant)
             if ai_params is None:
                 continue
+            # A universe's station map (configs/universes.yaml) routes weather events
+            # here, but the weather strategy also needs it to map a market to its NWS
+            # station. It was never passed on, so every weather market was skipped.
+            stations = ((self.settings.universes.get("universes", {}) or {}).get(variant.universe, {}) or {}).get("stations")
+            if stations and "stations" not in variant.params:
+                ai_params = {**ai_params, "stations": dict(stations)}
             if variant.strategy_name in MATCH_CONSUMERS:
                 ai_params = {
                     **ai_params,
