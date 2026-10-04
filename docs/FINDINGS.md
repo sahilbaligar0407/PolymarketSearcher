@@ -330,3 +330,12 @@ traders; the leaderboard surfaces wallets *because* their recent record is good.
 backward-looking score cannot separate skill from a streak among survivors, so QUALIFIED
 now also requires the older and newer halves of a record to be profitable independently.
 The copy arms remain the only real forward test.
+
+**47. The weather fix exposed a third bug, caught before it traded.** With its stations
+wired (#45) and a book quota so its markets had books, the strategy's first live forecast
+priced Los Angeles ">98 F" at 0.4% while the market said 63%. NWS forecast a 101 F
+heat-wave high; the strategy was using a 66 F *overnight low*, because the feed carries
+highs, lows and hourly values and it kept whichever arrived last, for any date. It would
+have bet heavily against a near-certain YES. It now uses daytime highs only, matched to
+each contract's own date: same contract, p = 0.84 at sigma 3 F. Every dead path brought
+back to life this session hid at least one more bug behind the first.
