@@ -120,7 +120,11 @@ strategies:
     evidence: B
     class: marketlab.strategies.cross_venue:CrossVenueRelativeValueStrategy
     # Polymarket is the SIGNAL source; every order goes to Kalshi.
-    universes: [btc_1h, btc_daily, politics_general, politics_elections, economics_fed, sports_nfl]
+    # Sports game-winner pairs are proven structurally (marketlab/matching/sports.py);
+    # the other universes trade only if the general matcher ever approves a pair.
+    # btc/economics/elections were dropped 2026-10-04: in a week the general matcher
+    # approved zero pairs there, so those sleeves were idle by construction.
+    universes: [sports_mlb, sports_nfl, sports_college, sports_nhl, sports_nba, politics_general]
     variants:
       min_edge: [0.02, 0.03, 0.05, 0.075, 0.10]
       require_match_confidence: [0.90]
@@ -206,7 +210,7 @@ strategies:
     evidence: D
     class: marketlab.strategies.copy_trader:CopyTraderStrategy
     # Signals come from Polymarket wallets; execution is on the matched Kalshi contract.
-    universes: [politics_general, politics_elections, sports_nfl, sports_nba, btc_1h, economics_fed]
+    universes: [sports_mlb, sports_nfl, sports_college, sports_nhl, sports_nba, politics_general]
     variants:
       follower_delay_seconds: [1, 5, 30, 120]
       mode: [raw, specialist, consensus, high_conviction, early, scale_in, fade]
@@ -219,7 +223,7 @@ strategies:
     enabled: true
     evidence: D
     class: marketlab.strategies.copy_trader:CopyBasketStrategy
-    universes: [politics_general, sports_nfl, sports_nba, btc_1h]
+    universes: [sports_mlb, sports_nfl, sports_college, politics_general]
     variants:
       basket_size: [5, 10, 20]
       weighting: [equal, forward_validated]

@@ -274,7 +274,7 @@ def _parse_time_window(
     hour = int(time_match.group("hour"))
     minute = int(time_match.group("minute") or 0)
     ampm = time_match.group("ampm").lower().replace(".", "")
-    if ampm.startswith("p") and hour != 12:
+    if ampm.startswith("p") and hour < 12:
         hour += 12
     if ampm.startswith("a") and hour == 12:
         hour = 0
@@ -310,7 +310,12 @@ def _parse_time_window(
             tz_label = anchor_tz_name
     tz_label = tz_label.upper()
     offset_hours = _resolve_tz_offset_hours(tz_label, date(year, month, day))
-    local_dt = datetime(year, month, day, hour, minute, tzinfo=_tz(timedelta(hours=offset_hours)))
+    try:
+        local_dt = datetime(year, month, day, hour, minute, tzinfo=_tz(timedelta(hours=offset_hours)))
+    except ValueError:
+        # Malformed text ("13PM", "Feb 30"): an unparseable time is "unknown", never a
+        # crash. One such title used to abort the entire matching pass every cycle.
+        return None, tz_label
     return local_dt.astimezone(UTC), tz_label
 
 

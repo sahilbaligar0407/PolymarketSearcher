@@ -32,7 +32,7 @@ import os
 import random
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -515,6 +515,10 @@ class IngestService:
         self.parquet = parquet
         self._cfg = ingest_config or load_ingest_config()
         self._max_tracked = int(self._cfg.get("max_tracked_markets", 400))
+        #: Polymarket ids with an approved Kalshi twin; their books are fetched first.
+        self.matched_poly_ids: set[str] = set()
+        self.matched_poly_markets: dict[str, NormalizedMarket] = {}
+        self.matched_kalshi_markets: dict[str, NormalizedMarket] = {}
 
         self.health = health or HealthMonitor(clock)
         self.markets = market_registry or MarketRegistry(
@@ -856,7 +860,11 @@ class IngestService:
             key=lambda m: (m.open_interest, m.volume),
             reverse=True,
         )
-        tickers = [m.venue_market_id for m in ranked[:sample]]
+        # Kalshi legs of approved cross-venue pairs always get a book; without one the
+        # pair can never trade, however good the match.
+        matched = [m.venue_market_id for m in self.matched_kalshi_markets.values()][:sample]
+        tickers = matched + [m.venue_market_id for m in ranked if m.venue_market_id not in set(matched)]
+        tickers = tickers[: sample + len(matched) // 2]
         if not tickers:
             return
         # Trades are a secondary signal and cost a second request per market, so they are
@@ -945,7 +953,12 @@ class IngestService:
             log.error("ingest_poly_markets_failed", error=str(exc))
 
     async def _ingest_poly_books_once(self, result: IngestOnceResult, *, sample: int = 15) -> None:
-        poly_markets = [m for m in self.markets.all() if m.venue is Venue.POLY_GLOBAL][:sample]
+        all_poly = [m for m in self.markets.all() if m.venue is Venue.POLY_GLOBAL]
+        # Markets with an approved Kalshi twin first: those are the books cross-venue and
+        # copy trading actually read. The rest fill whatever sample remains.
+        matched = list(self.matched_poly_markets.values())
+        rest = [m for m in all_poly if m.canonical_id not in self.matched_poly_ids]
+        poly_markets = (matched[: sample * 2] + rest)[: max(sample, min(len(matched), sample * 2))]
         if not poly_markets:
             return
         books_ok = 0
@@ -1220,12 +1233,42 @@ class IngestService:
             return
         if not kalshi or not poly:
             return
+
+        # Structural game-winner matching first, in its own guard: it is the matcher
+        # that actually produces approvable pairs, and a failure in the general
+        # free-text matcher below must never take it down (or vice versa).
+        matches: list[Any] = []
+        try:
+            from marketlab.matching.sports import match_games
+
+            now = self.clock.now()
+            sports = match_games(kalshi, poly, now)
+            matches.extend(sports)
+            by_id = {m.canonical_id: m for m in [*kalshi, *poly]}
+            # Upcoming games only: a settled game's pair is history, not an opportunity.
+            horizon = now + timedelta(days=4)
+            live_pairs = [
+                (by_id[m.canonical_id_a], by_id[m.canonical_id_b]) for m in sports
+                if (c := by_id[m.canonical_id_a].close_time) is not None and now < c <= horizon
+            ]
+            self.matched_kalshi_markets = {k.canonical_id: k for k, _ in live_pairs}
+            self.matched_poly_markets = {p.canonical_id: p for _, p in live_pairs}
+            self.matched_poly_ids = set(self.matched_poly_markets)
+            # Make both legs visible to strategies even if the bounded registry evicted
+            # them: a matched pair whose Kalshi market the runner never saw cannot trade.
+            for k_market, p_market in live_pairs:
+                for market in (k_market, p_market):
+                    if self.markets.get(market.canonical_id) is None:
+                        self.markets.upsert(market)
+                        self._enqueue(market_update_event(market, self.clock, "matcher"))
+            log.info("sports_matches", total=len(sports), upcoming=len(live_pairs))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("sports_matching_failed", error=str(exc), exc_info=True)
         try:
             matcher = CrossVenueMatcher(clock=self.clock)
-            matches = await matcher.match(kalshi, poly)
+            matches.extend(await matcher.match(kalshi, poly))
         except Exception as exc:  # noqa: BLE001
             log.warning("market_matching_failed", error=str(exc))
-            return
 
         saved = approved = 0
         for m in matches:
@@ -1465,11 +1508,14 @@ class IngestService:
                 if len(seen) > 50_000:
                     seen.clear()
                 self.health.record_message("gdelt")
-                log.info("ingest_gdelt_news", queries=len(batch), new_articles=fresh, candidates=len(ordered))
+                log.info("ingest_news", queries=len(batch), new_articles=fresh, candidates=len(ordered))
             except Exception as exc:  # noqa: BLE001
                 self.health.record_error("gdelt", exc)
-                log.warning("ingest_gdelt_failed", error=str(exc))
-            await self.clock.sleep(interval)
+                log.warning("ingest_news_failed", error=str(exc))
+                ordered = []
+            # At boot the market registry is still empty; retry soon rather than leaving
+            # the AI arms without news for a full interval.
+            await self.clock.sleep(interval if ordered else 60.0)
 
     async def _loop_probe_only(self, name: str, interval_key: str, default_seconds: float) -> None:
         """A source we only keep a live health signal for (X, Bluesky, sports odds,

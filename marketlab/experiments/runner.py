@@ -56,6 +56,8 @@ from marketlab.experiments.identity import ExperimentIdentity
 from marketlab.experiments.registry import ExperimentRegistry
 from marketlab.experiments.sweep import SweepError, VariantSpec, load_strategy_class
 from marketlab.logging import get_logger
+from marketlab.matching.book import MatchBook, MatchView
+from marketlab.matching.cross_venue import approved_for_automation
 from marketlab.settings import Settings
 from marketlab.storage.state import ExperimentStatus, StateStore
 
@@ -169,6 +171,10 @@ def _event_canonical_id(event: BaseEvent) -> str | None:
     return None
 
 
+#: Strategy families that read ``params["matches"]``.
+MATCH_CONSUMERS = frozenset({"cross_venue", "copy_trader", "copy_basket"})
+
+
 class ExperimentRunner:
     """Drives every registered sleeve against one shared event stream."""
 
@@ -198,6 +204,10 @@ class ExperimentRunner:
         #: back to the single ``ai_provider`` with no escalation and no shared caches.
         self.ai_stack = ai_stack
         self._ai_skipped: Counter[str] = Counter()
+        #: Approved cross-venue pairs, refreshed from storage; see marketlab.matching.book.
+        self.match_book = MatchBook()
+        self._matches_refreshed_at: datetime | None = None
+        self.trader_actions_translated = 0
         #: Shared with the broker so BOTH mutate the same Portfolio object.
         #:
         #: The broker looks a sleeve's portfolio up by experiment_id through its
@@ -280,6 +290,8 @@ class ExperimentRunner:
             ai_params = self._ai_params(variant)
             if ai_params is None:
                 continue
+            if variant.strategy_name in MATCH_CONSUMERS:
+                ai_params = {**ai_params, "matches": MatchView(self.match_book, variant.universe, self._universes_for)}
 
             strategy_id = f"{variant.strategy_name}__{variant.universe}__{identity_mod.parameter_hash(variant.params)}"
             strategy_version = str(getattr(strategy_cls, "version", "1.0.0"))
@@ -560,7 +572,52 @@ class ExperimentRunner:
     # dispatch
     # ------------------------------------------------------------------
 
+    def _universes_for(self, canonical_id: str) -> Any:
+        return self.market_registry.universes_for(canonical_id) if hasattr(self.market_registry, "universes_for") else ()
+
+    def refresh_matches(self, force: bool = False) -> int:
+        """Reload the approved cross-venue pairs from storage (at most every 5 minutes)."""
+        now = self.clock.now()
+        if not force and self._matches_refreshed_at is not None and (now - self._matches_refreshed_at).total_seconds() < 300:
+            return len(self.match_book)
+        self._matches_refreshed_at = now
+        try:
+            rows = self.store.approved_matches()
+        except Exception:  # noqa: BLE001 - keep the previous book on a read failure
+            log.error("runner.match_refresh_failed", exc_info=True)
+            return len(self.match_book)
+        self.match_book.replace([m for m in rows if approved_for_automation(m)])
+        log.info("runner.matches_refreshed", approved=len(self.match_book))
+        return len(self.match_book)
+
+    def _translate_trader_action(self, event: TraderActionEvent) -> TraderActionEvent:
+        """Re-point a Polymarket trade at its proven Kalshi twin.
+
+        Wallet activity arrives keyed by the Polymarket market, with ``side`` set only for
+        literal Yes/No outcomes - so a buy of "Padres" reached copy_trader with a ``poly:``
+        id and no side, and was refused every time. With an approved YES==YES pair, buying
+        Polymarket outcome[0] is a Kalshi YES and buying outcome[1] is a Kalshi NO. Sells
+        are left untranslated: exiting a position is not a signal to open one.
+        """
+        match = self.match_book.for_poly(event.canonical_id)
+        if match is None or str(event.action).lower() != "buy":
+            return event
+        poly_market = self._markets.get(event.canonical_id)
+        if poly_market is None:
+            return event
+        outcome = event.outcome.strip().lower()
+        if outcome and outcome == poly_market.yes_symbol.strip().lower():
+            side = Side.YES
+        elif outcome and outcome == poly_market.no_symbol.strip().lower():
+            side = Side.NO
+        else:
+            return event
+        self.trader_actions_translated += 1
+        return event.model_copy(update={"canonical_id": match.canonical_id_a, "side": side})
+
     async def dispatch(self, event: BaseEvent) -> None:
+        if isinstance(event, TraderActionEvent) and event.canonical_id.startswith("poly:"):
+            event = self._translate_trader_action(event)
         self._update_caches(event)
         if self.ai_stack is not None:
             with contextlib.suppress(Exception):
@@ -680,6 +737,7 @@ class ExperimentRunner:
             TimerEvent(event_time=now, first_seen_time=now, interval_seconds=self.settings.paper.tick_seconds)
         )
         self._start_ai_inference()
+        self.refresh_matches()
         self._flush_forecasts()
         if self._last_snapshot is None or (now - self._last_snapshot).total_seconds() >= self.settings.paper.snapshot_seconds:
             await self.snapshot()
