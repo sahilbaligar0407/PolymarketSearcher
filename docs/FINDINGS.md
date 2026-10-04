@@ -294,3 +294,23 @@ pair had ever been approved were dropped to make room instead.
 **41. Every trade's "why" was being discarded.** `orders` stored what happened, never the
 intent's rationale or features, so no filled trade could be explained after the fact. A
 `decisions` table now keeps them for every fill (rejections already carry their reason).
+
+**42. One strategy's housekeeping froze the whole daemon.** Twenty-five minutes after a
+restart, trading halted with `kalshi_rest` "down" and HTTP calls reporting 975-second
+latencies - against a 10 s client timeout and a network that answered `curl` in 0.1 s.
+Heartbeats (every 30 s) arrived 211 s, 289 s, then 587 s apart. `py-spy dump` on the live
+process showed the cause in one frame: `binary_parity._refresh_pairs` running regex claim
+extraction over every market in the shared context and comparing all n^2 pairs, on the
+event loop, in each of 12 sleeves, whenever the market count changed. It had been latent
+all along; growing the tracked set from 115 to 505 markets made it fatal. Lesson worth
+keeping: when every source "hangs" at once, profile the process before blaming the network.
+
+**43. `ctx.markets()` was every market, for every sleeve, every second.** Strategies that
+loop over it on each tick paid for thousands of markets they never trade, and loops that
+don't check universe membership - the random control among them - traded markets outside
+their sleeve's declared universe. Each sleeve now gets a context whose `markets()` is its
+own universe; lookups by id stay global.
+
+**44. A green test run was not a gate.** One commit in this session was pushed with two
+failing tests because the shell chain checked `tail`'s exit status rather than
+pytest's. The gate now reads pytest's own exit code.
