@@ -33,7 +33,7 @@ log = get_logger(__name__)
 #: Bumped whenever the comparison logic in ``resolution_rules`` changes. A re-match
 #: under new logic is a new experiment -- this string is part of that identity, mirrored
 #: verbatim into every persisted ``MarketMatch.validator_version``.
-VALIDATOR_VERSION = "1.0.0"
+VALIDATOR_VERSION = "1.1.0"
 
 #: Mirrors ``configs/strategies.yaml: cross_venue.variants.require_match_confidence``.
 DEFAULT_MIN_MATCH_CONFIDENCE = Decimal("0.90")

@@ -45,6 +45,9 @@ DEFAULT_NEWS_TONE_THRESHOLD = 0.7
 
 Series = list[tuple[datetime, Decimal]]
 
+#: Resolution of the list-based price histories (see ``BaseStrategy.append_sample``).
+SAMPLE_SPACING_SECONDS = 5.0
+
 #: Probability epsilon kept away from the exact [0, 1] boundary - logit-space signals and
 #: fee formulas are undefined or degenerate exactly at 0 or 1.
 _PROB_EPS = Decimal("0.0001")
@@ -312,6 +315,22 @@ class BaseStrategy(Strategy):
         cutoff = now.timestamp() - max_age_seconds
         while history and history[0][0].timestamp() < cutoff:
             history.pop(0)
+
+    @staticmethod
+    def append_sample(
+        history: Series, now: datetime, value: Decimal, min_spacing_seconds: float = SAMPLE_SPACING_SECONDS
+    ) -> None:
+        """Append ``(now, value)``, but at most one entry per ``min_spacing_seconds``.
+
+        A sample inside the spacing overwrites the newest entry's value and keeps its
+        timestamp, so the series stays a fixed-resolution record of the latest price. The
+        Kalshi websocket can deliver many book updates a second per market; recording each
+        one, for every sleeve, grew these lists to tens of GB in two hours (2026-10-04).
+        """
+        if history and (now - history[-1][0]).total_seconds() < min_spacing_seconds:
+            history[-1] = (history[-1][0], value)
+            return
+        history.append((now, value))
 
     @staticmethod
     def find_anchor(history: Series, lookback_seconds: float, now: datetime) -> Decimal | None:

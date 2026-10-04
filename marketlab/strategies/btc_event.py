@@ -132,7 +132,7 @@ class BtcEventStrategy(BaseStrategy):
         reference_symbols = self.param("reference_symbols", ("BTC-USD",))
         if event.symbol not in reference_symbols:
             return
-        self._spot_history.append((event.first_seen_time, event.price))
+        self.append_sample(self._spot_history, event.first_seen_time, event.price)
         vol_window_seconds = float(self.param("vol_window_minutes", 60.0)) * 60.0
         self.prune_series(self._spot_history, event.first_seen_time, vol_window_seconds * 8)
 

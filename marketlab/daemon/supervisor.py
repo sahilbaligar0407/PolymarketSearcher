@@ -50,6 +50,7 @@ from marketlab.daemon.health import HealthMonitor
 from marketlab.daemon.ingest import IngestService, load_ingest_config
 from marketlab.daemon.recovery import RecoveryService
 from marketlab.daemon.registry import BookRegistry, MarketRegistry, PortfolioRegistry
+from marketlab.daemon.watchdog import HangWatchdog
 from marketlab.execution.fill_models import build_limit_fill_model
 from marketlab.execution.kalshi_live import KalshiLiveBroker, LiveTradingBlocked
 from marketlab.execution.latency import LatencyModel
@@ -66,6 +67,9 @@ log = get_logger(__name__)
 #: tick/snapshot cadences -- promotion is a judgment about weeks of history, not seconds.
 PROMOTION_INTERVAL_SECONDS = 6 * 3600.0
 HEARTBEAT_INTERVAL_SECONDS = 30.0
+#: No progress for this long kills the process so START_TRADING.bat restarts it.
+BOOT_HANG_LIMIT_SECONDS = 1200.0
+RUN_HANG_LIMIT_SECONDS = 600.0
 MAIN_LOOP_QUEUE_TIMEOUT = 1.0
 #: Yield to the event loop this often while draining a hot queue, so ingest
 #: tasks and the heartbeat are not starved by a CPU-bound dispatch burst.
@@ -219,6 +223,7 @@ class Supervisor:
         self.broker: _HealthGatedBroker | None = None
         self.runner: Any | None = None
         self.ai_stack: AIStack | None = None
+        self._watchdog: HangWatchdog | None = None
         self.variants: list[Any] = []
 
         self.started_at: datetime | None = None
@@ -236,6 +241,9 @@ class Supervisor:
         self.settings.ensure_dirs()
         configure_logging(self.settings.log_dir, level="INFO")
         log.info("supervisor_boot_begin", mode=self.settings.mode.value)
+        # Boot touches the network (Ollama, geoblock, Kalshi recovery); give it 20 min.
+        self._watchdog = HangWatchdog(BOOT_HANG_LIMIT_SECONDS)
+        self._watchdog.start()
 
         self.store = StateStore.open(self.settings.db_path)
         self.async_store = AsyncStateStore(self.store)
@@ -279,6 +287,7 @@ class Supervisor:
             portfolio_registry=self.portfolio_registry,
             kalshi_rest=self.ingest.kalshi_rest,
         )
+        self._watchdog.beat("recovery")
         recovery_summary = await recovery.restore(self.store, self._raw_broker, self.runner)
         log.info("recovery_summary", detail=recovery_summary.render())
 
@@ -287,6 +296,7 @@ class Supervisor:
         self._install_signal_handlers()
         self._heartbeat_task = asyncio.ensure_future(self._heartbeat_loop())
 
+        self._watchdog.set_limit(RUN_HANG_LIMIT_SECONDS, "running")
         log.info("supervisor_boot_complete", mode=self.settings.mode.value)
         try:
             await self._main_loop()
@@ -666,6 +676,8 @@ class Supervisor:
             await self.clock.sleep(HEARTBEAT_INTERVAL_SECONDS)
             if self._stop_event.is_set():
                 break
+            if self._watchdog is not None:
+                self._watchdog.beat()
             try:
                 status = self.build_status()
                 self._last_heartbeat = self.clock.now()
@@ -709,6 +721,8 @@ class Supervisor:
 
     async def _shutdown(self) -> None:
         log.info("supervisor_shutdown_begin")
+        if self._watchdog is not None:
+            self._watchdog.stop()
         if self.ingest is not None:
             with contextlib.suppress(Exception):
                 await self.ingest.stop()

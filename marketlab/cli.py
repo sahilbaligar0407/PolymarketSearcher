@@ -365,16 +365,19 @@ def markets_cmd(
 
         clock = LiveClock()
 
-        async def _probe_us() -> SourceHealth:
+        async def _fetch_us() -> tuple[SourceHealth, list[dict[str, Any]]]:
             adapter = PolymarketUsAdapter(settings.sources.poly_us_rest, clock)
             try:
-                return await adapter.probe()
+                return await adapter.probe(), await adapter.get_markets(limit=limit)
             finally:
                 await adapter.close()
 
-        health = _run(_probe_us())
+        health, rows = _run(_fetch_us())
         console.print(f"Polymarket US: {_fmt_health(health)}")
-        console.print("[dim]No public data tier is available on this host; see docs/FINDINGS.md #15.[/dim]")
+        for raw in rows:
+            bid = (raw.get("bestBidQuote") or {}).get("value", "-")
+            ask = (raw.get("bestAskQuote") or {}).get("value", "-")
+            console.print(f"  {raw.get('slug')}  bid {bid}  ask {ask}  {raw.get('question', '')}")
         return
 
     if venue not in (Venue.POLY_GLOBAL.value, Venue.KALSHI.value):

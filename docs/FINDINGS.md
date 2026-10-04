@@ -350,3 +350,37 @@ real hourly strikes (`KXBTCD`) were crowded down to 10-18 books. `KXETH` likewis
 and the tracked set reserves slots for quota universes, since ranking by open interest
 always favours season-long sports markets over contracts that settle within hours. One
 unit test had only passed *because of* the prefix bug.
+
+**49. The live order book feed had never worked, and fixing it found four bugs behind it.**
+(2026-10-04) Kalshi now sends websocket snapshots as `yes_dollars_fp`/`no_dollars_fp` and
+deltas as `price_dollars`/`delta_fp` with fractional sizes; the adapter read `yes`/`no`/
+`price`/`delta`, so every snapshot built an *empty* book. Separately, `seq` is numbered per
+subscription (`sid`), shared by every ticker on it and by command acks, while the adapter
+checked it per ticker, so every interleaved update looked like a gap. Each false gap wiped
+the book and resent a subscribe for every following delta (~400 MB of log a minute during
+NFL games). `market_lifecycle` is also an unknown channel (it is `market_lifecycle_v2`).
+Once books really streamed, four things behind them broke in turn: a delta parse crash
+that dropped the connection every few seconds; the paper broker's point-in-time book
+history, which was append-only and linearly scanned (51 GB private memory and a stalled
+event loop within two hours); per-update price histories in momentum and the controls;
+and runner throughput, since ~660 sleeves cannot take hundreds of books a second (books
+are now coalesced to one per market per 5 s, histories sampled at 5 s, broker history
+trimmed to 5 minutes).
+
+**50. The market maker could never have traded.** Its grid was 27 combinations under
+`variant_limit: 9`, and truncation by sorted parameter JSON kept exactly the nine
+`base_spread: 0.02` arms - a spread its own fee gate rejects at every price, since a
+1-contract fee is never below 1 cent. 27 sleeves placed zero orders in a month, and
+nothing in production drained its `cancel_requests()`. Fixed, it then showed +$297 in two
+hours, which was one correlated BTC hour across nine near-identical sleeves *and* fills at
+off-grid prices like 0.6427 (quotes were never snapped to the tick). It is now 1.1.0 with
+tick-grid quotes, a requote throttle and a back-off after risk rejections; the runner
+also holds back an intent the risk gate just rejected for 60 s instead of re-submitting
+it every tick (~1,300 rejected rows per strategy per 6 minutes).
+
+**51. A daemon booted without network hung silently instead of failing.** Boot recovery
+looked up every held market on Kalshi one at a time with 5 retried 10 s requests: hours
+with the Wi-Fi down, and the process stayed alive, so the restart loop never fired. It is
+now bounded (8 at a time, 90 s; the settlements loop finishes the rest), and a thread-
+based hang watchdog exits the process when the heartbeat stops for 10 minutes (20 during
+boot), counting its own checks so a sleeping laptop is not mistaken for a hang.

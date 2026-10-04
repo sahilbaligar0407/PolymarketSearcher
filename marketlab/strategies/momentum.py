@@ -71,7 +71,7 @@ class MomentumStrategy(BaseStrategy):
     def on_external_price(self, event: ExternalPriceEvent) -> None:
         st = self._reference_state(event.symbol)
         history: list[tuple[datetime, Decimal]] = st["history"]
-        history.append((event.first_seen_time, event.price))
+        self.append_sample(history, event.first_seen_time, event.price)
         lookback = float(self.param("lookback_seconds", 300.0))
         self.prune_series(history, event.first_seen_time, lookback * 4)
 
@@ -114,7 +114,7 @@ class MomentumStrategy(BaseStrategy):
 
         st = self.state(canonical_id)
         history: list[tuple[datetime, Decimal]] = st.setdefault("price_history", [])
-        history.append((now, mid))
+        self.append_sample(history, now, mid)
         self.prune_series(history, now, lookback * 4)
 
         returns: RollingWindow = st.setdefault("returns", RollingWindow(30))

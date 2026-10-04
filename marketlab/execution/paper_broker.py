@@ -23,7 +23,7 @@ non-negotiable and enforced structurally, not just by convention:
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Decimal
 from typing import Any, Protocol, runtime_checkable
 
@@ -55,6 +55,9 @@ from marketlab.execution.fill_models import LimitFillModel, OrderState, walk_boo
 from marketlab.execution.latency import LatencyModel
 from marketlab.execution.risk_gateway import RiskGateway
 from marketlab.settings import Settings
+
+#: How far behind the newest book per market the point-in-time history reaches.
+BOOK_HISTORY_SECONDS = 300.0
 
 # ---------------------------------------------------------------------------
 # Fees
@@ -157,8 +160,9 @@ class PaperBroker(Broker):
         self._orders: dict[str, Order] = {}
         self._resting: dict[str, OrderState] = {}
         self._resting_by_market: dict[str, set[str]] = {}
-        #: Append-only, ascending-by-timestamp per market. The only source of truth
-        #: `_book_as_of` reads from; `book_provider` is merged into it, never read directly.
+        #: Ascending-by-timestamp per market, trimmed to BOOK_HISTORY_SECONDS behind the
+        #: newest book. The only source of truth `_book_as_of` reads from; `book_provider`
+        #: is merged into it, never read directly.
         self._book_history: dict[str, list[OrderBook]] = {}
         self._experiments_by_market: dict[str, set[str]] = {}
 
@@ -180,6 +184,16 @@ class PaperBroker(Broker):
         while idx > 0 and history[idx - 1].timestamp > book.timestamp:
             idx -= 1
         history.insert(idx, book)
+        # Point-in-time lookups only ever reach back by the simulated network latency
+        # (milliseconds), so old books are dead weight. Unpruned, this list held every
+        # book ever seen; with the streaming Kalshi feed that was tens of GB in two hours,
+        # and the linear scan in `_book_as_of` stalled the event loop (2026-10-04).
+        cutoff = history[-1].timestamp - timedelta(seconds=BOOK_HISTORY_SECONDS)
+        drop = 0
+        while drop < len(history) - 1 and history[drop].timestamp < cutoff:
+            drop += 1
+        if drop:
+            del history[:drop]
 
     def _book_as_of(self, canonical_id: str, as_of: datetime) -> OrderBook | None:
         """The most recent book with ``timestamp <= as_of``. Never a later one.
@@ -194,13 +208,10 @@ class PaperBroker(Broker):
         fallback = self.book_provider(canonical_id)
         if fallback is not None:
             self._record_book(fallback)
-        candidate: OrderBook | None = None
-        for b in self._book_history.get(canonical_id, ()):
+        for b in reversed(self._book_history.get(canonical_id, ())):
             if b.timestamp <= as_of:
-                candidate = b
-            else:
-                break
-        return candidate
+                return b
+        return None
 
     # -- risk-gateway context (documented single-portfolio approximations) --------
 

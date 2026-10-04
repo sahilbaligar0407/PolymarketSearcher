@@ -137,7 +137,7 @@ class FadeStrategy(BaseStrategy):
         st = self.state(canonical_id)
         history: list[tuple[Any, Decimal]] = st.setdefault("price_history", [])
         now = self.now()
-        history.append((now, mid))
+        self.append_sample(history, now, mid)
         self.prune_series(history, now, lookback * 4)
 
         anchor = self.find_anchor(history, lookback, now)

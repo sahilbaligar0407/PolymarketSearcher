@@ -59,6 +59,15 @@ class MarketClaim:
     inclusion_exclusion: frozenset[str] = field(default_factory=frozenset)
     settlement_timing: str | None = None
     raw_title: str = ""
+    #: US states / major cities named by the market ("TX", "MI", "CITY:CHICAGO"). A
+    #: Texas race and a Michigan race are never the same bet, however alike the English.
+    locations: frozenset[str] = field(default_factory=frozenset)
+    #: Political parties the market is about ("R", "D", "L").
+    parties: frozenset[str] = field(default_factory=frozenset)
+    #: Capitalized proper names in a sentence-case title (people, teams, places the
+    #: gazetteers do not know). Empty for title-cased titles, where capitals carry no
+    #: signal.
+    named_entities: frozenset[str] = field(default_factory=frozenset)
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +106,63 @@ _ENTITY_ALIASES: dict[str, str] = {
     "new york city": "NYC",
     "new york": "NYC",
 }
+
+_US_STATES: dict[str, str] = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID", "illinois": "IL",
+    "indiana": "IN", "iowa": "IA", "kansas": "KS", "kentucky": "KY", "louisiana": "LA",
+    "maine": "ME", "maryland": "MD", "massachusetts": "MA", "michigan": "MI",
+    "minnesota": "MN", "mississippi": "MS", "missouri": "MO", "montana": "MT",
+    "nebraska": "NE", "nevada": "NV", "new hampshire": "NH", "new jersey": "NJ",
+    "new mexico": "NM", "north carolina": "NC", "north dakota": "ND", "ohio": "OH",
+    "oklahoma": "OK", "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI",
+    "south carolina": "SC", "south dakota": "SD", "tennessee": "TN", "texas": "TX",
+    "utah": "UT", "vermont": "VT", "virginia": "VA", "west virginia": "WV",
+    "wisconsin": "WI", "wyoming": "WY",
+    # Bare "washington" is deliberately absent: state, D.C. and several teams share it.
+    "washington state": "WA", "washington dc": "DC", "washington d c": "DC",
+    "district of columbia": "DC",
+    # "New York" is ambiguous between city and state, so every spelling folds to one
+    # token rather than letting "NYC" vs "New York" read as a conflict.
+    "new york": "NY", "new york city": "NY", "new york state": "NY", "nyc": "NY",
+}
+
+_US_CITIES: dict[str, str] = {
+    name: f"CITY:{name.upper().replace(' ', '_')}"
+    for name in (
+        "los angeles", "chicago", "houston", "phoenix", "philadelphia", "san antonio",
+        "san diego", "dallas", "austin", "san francisco", "seattle", "denver", "boston",
+        "miami", "atlanta", "detroit", "las vegas", "new orleans", "minneapolis",
+        "kansas city", "oklahoma city", "salt lake city", "virginia beach",
+    )
+}
+
+#: Longest phrase first, so "kansas city" is consumed before "kansas" and "west
+#: virginia" before "virginia".
+_LOCATION_PHRASES: tuple[tuple[str, str], ...] = tuple(
+    sorted({**_US_STATES, **_US_CITIES}.items(), key=lambda kv: -len(kv[0]))
+)
+
+_PARTY_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?:republicans?|gop)\b", re.IGNORECASE), "R"),
+    # "Democratic Republic of the Congo" is a country, not a party.
+    (re.compile(r"\b(?:democrats?|democratic(?!\s+republic)|dems?)\b", re.IGNORECASE), "D"),
+    (re.compile(r"\blibertarians?\b", re.IGNORECASE), "L"),
+)
+
+#: Capitalized words that are never a distinguishing proper name.
+_NON_NAME_WORDS: frozenset[str] = frozenset(
+    {
+        "will", "who", "what", "which", "when", "how", "the", "senate", "house", "race",
+        "election", "elections", "president", "presidential", "governor", "primary",
+        "general", "special", "midterm", "midterms", "congress", "seat", "week", "game",
+        "season", "series", "championship", "cup", "super", "bowl", "world", "finals",
+        "win", "wins", "lose", "loses", "beat", "beats", "make", "makes", "get", "say",
+        "yes", "no", "party", "control", "majority", "us", "u", "s", "united", "states",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    }
+)
 
 #: Tokens that carry no discriminating meaning for subject/entity comparison.
 _STOPWORDS: frozenset[str] = frozenset(
@@ -212,6 +278,62 @@ def _extract_entities(text: str) -> frozenset[str]:
         # not a subject entity -- it is surfaced separately via resolution_authority so
         # it does not also masquerade as a subject mismatch.
         if token in _non_entity_tokens or _STATION_RE.fullmatch(token):
+            continue
+        found.add(token)
+    return frozenset(found)
+
+
+def _extract_locations(text: str) -> frozenset[str]:
+    # Punctuation folds to spaces so "Washington, D.C." and "washington dc" both hit.
+    remaining = f" {re.sub(r'[^a-z0-9]+', ' ', text.lower())} "
+    found: set[str] = set()
+    for phrase, code in _LOCATION_PHRASES:
+        pattern = rf"\b{re.escape(phrase)}\b"
+        if re.search(pattern, remaining):
+            found.add(code)
+            # Consume the span so "kansas city" does not also count as Kansas.
+            remaining = re.sub(pattern, " ", remaining)
+    return frozenset(found)
+
+
+def _extract_parties(text: str) -> frozenset[str]:
+    return frozenset(code for pattern, code in _PARTY_PATTERNS if pattern.search(text))
+
+
+_LOCATION_WORDS: frozenset[str] = frozenset(
+    w for phrase, _code in _LOCATION_PHRASES for w in phrase.split()
+)
+_PARTY_WORDS: frozenset[str] = frozenset(
+    {"republican", "republicans", "gop", "democrat", "democrats", "democratic", "dem", "dems",
+     "libertarian", "libertarians"}
+)
+
+
+def _extract_named_entities(title: str) -> frozenset[str]:
+    """Capitalized proper names from a sentence-case title ("Trump", "Ossoff", "Lakers").
+
+    A title-cased title ("Will The Democrats Win The Michigan Senate Race?") capitalizes
+    every word, so its capitals say nothing; it yields the empty set (= no signal), never
+    a guess. States, cities and parties are excluded here -- they have their own fields.
+    """
+    words = re.findall(r"[A-Za-z][A-Za-z'-]*", title)
+    content = [w for w in words[1:] if len(w) >= 4 and w.lower() not in _STOPWORDS]
+    if content and all(w[0].isupper() for w in content):
+        return frozenset()  # title case: not one ordinary word was left lowercase
+    found: set[str] = set()
+    for w in words:
+        if not (w[0].isupper() and any(c.islower() for c in w)):
+            continue  # lowercase word, or an all-caps acronym (handled by _extract_entities)
+        token = w.lower().removesuffix("'s")
+        if (
+            len(token) < 3
+            or token in _STOPWORDS
+            or token in _NON_NAME_WORDS
+            or token in _MONTHS
+            or token in _LOCATION_WORDS
+            or token in _PARTY_WORDS
+            or token in _ENTITY_ALIASES  # already compared via `entities`
+        ):
             continue
         found.add(token)
     return frozenset(found)
@@ -455,6 +577,11 @@ def extract_claim_from_text(
     entities = _extract_entities(combined)
     subject_tokens = _tokenize(title)
     subject = " ".join(sorted(entities)) or title.strip().lower()
+    # Location and party come from the title when it names one; rules text is only a
+    # fallback, because it routinely mentions the other party or a certifying state in
+    # passing ("...if a candidate who caucuses with Republicans...").
+    locations = _extract_locations(title) or _extract_locations(rules_text)
+    parties = _extract_parties(title) or _extract_parties(rules_text)
 
     return MarketClaim(
         subject=subject,
@@ -473,6 +600,9 @@ def extract_claim_from_text(
         inclusion_exclusion=_extract_inclusion_exclusion(combined),
         settlement_timing=_extract_settlement_timing(combined),
         raw_title=title,
+        locations=locations,
+        parties=parties,
+        named_entities=_extract_named_entities(title),
     )
 
 

@@ -9,7 +9,7 @@ most wants to sit. Every departure from the textbook model below is one of those
 facts asserting itself.
 
 Params (see ``configs/strategies.yaml``):
-    base_spread        in {0.02, 0.03, 0.05}
+    base_spread        in {0.05}  (0.02 can never clear the fee gate; see the config)
     inventory_penalty  in {0.5, 1.0, 2.0}
     mode               in {two_sided, one_sided, inventory_neutral}
     news_pause         in {true}
@@ -34,7 +34,7 @@ resize-to-zero intent just to carry a cancellation, which is a worse fit for a f
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any
 
 from marketlab.core.events import BookUpdateEvent, MarketStatusEvent, NewsEvent
@@ -66,11 +66,17 @@ DEFAULT_NEWS_PAUSE_SECONDS = 60.0
 DEFAULT_MAX_INVENTORY = 10
 
 
+#: Seconds a market is left alone after one of this sleeve's quotes is rejected.
+DEFAULT_REJECT_COOLDOWN_SECONDS = 120.0
+#: Minimum seconds between moving a fully resting quote.
+DEFAULT_MIN_REQUOTE_SECONDS = 15.0
+
+
 class AvellanedaStoikovBinaryStrategy(BaseStrategy):
     """Two-sided (or filtered one-sided) quoting around a bounded-claim reservation price."""
 
     name = "market_maker"
-    version = "1.0.0"
+    version = "1.1.0"  # 1.1.0: tick-grid quotes; resting quotes kept; requote throttle; reject back-off
     evidence_class = "B"
 
     def __init__(
@@ -97,6 +103,11 @@ class AvellanedaStoikovBinaryStrategy(BaseStrategy):
 
     def on_order_update(self, order: Order) -> None:
         ids = self._resting_orders.setdefault(order.canonical_id, set())
+        if order.status is OrderStatus.REJECTED:
+            # A risk-gate rejection repeats on every book update until exposure changes;
+            # without a back-off one sleeve re-posted into the same wall ~200x a minute.
+            cooldown = float(self.param("reject_cooldown_seconds", DEFAULT_REJECT_COOLDOWN_SECONDS))
+            self.state(order.canonical_id)["rejected_until"] = self.now().timestamp() + cooldown
         if order.is_terminal:
             ids.discard(order.order_id)
         elif order.status in (OrderStatus.PENDING, OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED):
@@ -146,6 +157,8 @@ class AvellanedaStoikovBinaryStrategy(BaseStrategy):
             return
         if self._in_news_pause():
             self._cancel_all(canonical_id)
+            return
+        if self.now().timestamp() < self.state(canonical_id).get("rejected_until", 0.0):
             return
 
         book = self.ctx.book(canonical_id)
@@ -237,8 +250,10 @@ class AvellanedaStoikovBinaryStrategy(BaseStrategy):
             desired_half_spread += late_widen_max * late_fraction
 
         tick = market.tick_size
-        bid_price = _clamp_price(reservation_price - desired_half_spread, tick)
-        ask_price = _clamp_price(reservation_price + desired_half_spread, tick)
+        bid_price = _clamp_price(_to_tick(reservation_price - desired_half_spread, tick, ROUND_FLOOR), tick)
+        ask_price = _clamp_price(_to_tick(reservation_price + desired_half_spread, tick, ROUND_CEILING), tick)
+        if bid_price >= ask_price:
+            return  # the spread collapsed inside one tick; nothing sensible to post
 
         mode = str(self.param("mode", "two_sided"))
         max_inventory = int(self.param("max_inventory", DEFAULT_MAX_INVENTORY))
@@ -262,6 +277,23 @@ class AvellanedaStoikovBinaryStrategy(BaseStrategy):
             "bid_price": float(bid_price),
             "ask_price": float(ask_price),
         }
+
+        # Leave identical quotes resting. Re-posting the same bid/ask on every book tick
+        # just cancels and resubmits two orders per update per sleeve, and loses the
+        # queue position the fill models give a resting order.
+        quote_key = (bid_price if quote_bid else None, ask_price if quote_ask else None, quantity)
+        resting = self._resting_orders.get(canonical_id, set())
+        fully_resting = len(resting) == int(quote_bid) + int(quote_ask)
+        if st.get("live_quote") == quote_key and fully_resting:
+            return
+        # A cent of drift is not worth two cancels and two new orders per update: keep a
+        # live two-sided quote at least min_requote_seconds before moving it.
+        min_requote = float(self.param("min_requote_seconds", DEFAULT_MIN_REQUOTE_SECONDS))
+        now_ts = self.now().timestamp()
+        if fully_resting and resting and now_ts - st.get("quoted_at", 0.0) < min_requote:
+            return
+        st["live_quote"] = quote_key
+        st["quoted_at"] = now_ts
 
         self._cancel_all(canonical_id)
         quoted_any = False
@@ -332,6 +364,15 @@ def _seconds_to_close(market: NormalizedMarket, now: Any) -> float | None:
     if market.close_time is None:
         return None
     return (market.close_time - now).total_seconds()
+
+
+def _to_tick(price: Decimal, tick: Decimal, rounding: str) -> Decimal:
+    """Snap a quote onto the venue's price grid, away from the mid (bids down, asks up).
+    Unsnapped quotes rested at prices like 0.6427 and the paper broker filled them there,
+    at prices that cannot trade on Kalshi (seen 2026-10-04)."""
+    if tick <= 0:
+        return price
+    return (price / tick).to_integral_value(rounding=rounding) * tick
 
 
 def _clamp_price(price: Decimal, tick: Decimal) -> Decimal:

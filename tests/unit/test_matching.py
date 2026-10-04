@@ -17,13 +17,15 @@ from typing import Any
 import pytest
 
 from marketlab.clock import SimulatedClock
-from marketlab.core.instruments import Venue
+from marketlab.core.instruments import Category, Venue
 from marketlab.matching.cross_venue import (
     VALIDATOR_VERSION,
     CrossVenueMatcher,
     MarketMatch,
     approved_for_automation,
 )
+from marketlab.matching.extract import extract_claim_from_text
+from marketlab.matching.resolution_rules import compare_claims
 from marketlab.matching.semantic_match import build_candidates, jaccard, propose_candidates
 from tests.fixtures.match_pairs import (
     BTC_REWORDED_SAME_TERMINAL,
@@ -288,3 +290,96 @@ async def test_matcher_match_id_is_stable_and_order_independent() -> None:
     second = await matcher.match(kalshi_markets, poly_markets)
     assert first[0].match_id == second[0].match_id
     assert first[0].validator_version == VALIDATOR_VERSION
+
+
+# ---------------------------------------------------------------------------
+# conflicting named entities (regression: TX-R / OH / NJ / NH Senate markets were all
+# paired with "Democrats win Michigan" at 0.85, same_outcome_boolean=True)
+# ---------------------------------------------------------------------------
+
+MICHIGAN_D = "Will the Democrats win the Michigan Senate race in 2026?"
+
+
+def _compare(title_a: str, title_b: str, rules_a: str = "", rules_b: str = "") -> Any:
+    return compare_claims(extract_claim_from_text(title_a, rules_a), extract_claim_from_text(title_b, rules_b))
+
+
+@pytest.mark.parametrize(
+    ("kalshi_title", "expected_reasons"),
+    [
+        ("Will Republicans win the Senate race in Texas?", {"location_mismatch", "party_mismatch"}),
+        ("Will Democrats win the Senate race in Ohio?", {"location_mismatch"}),
+        ("Will Republicans win the Senate race in New Jersey?", {"location_mismatch", "party_mismatch"}),
+        ("Will Democrats win the Senate race in New Hampshire?", {"location_mismatch"}),
+        ("Will Republicans win the Senate race in Michigan?", {"party_mismatch"}),
+    ],
+)
+def test_conflicting_state_or_party_rejects_the_pair(kalshi_title: str, expected_reasons: set[str]) -> None:
+    result = _compare(kalshi_title, MICHIGAN_D)
+    assert result.same_outcome_boolean is False
+    assert expected_reasons <= set(result.blocking_reasons)
+    assert result.confidence <= Decimal("0.10")
+
+
+def test_same_state_and_party_is_still_a_candidate_match() -> None:
+    result = _compare("Will Democrats win the Senate race in Michigan?", MICHIGAN_D)
+    assert result.same_outcome_boolean is True
+    assert not {"location_mismatch", "party_mismatch"} & set(result.blocking_reasons)
+
+
+def test_state_named_on_only_one_side_blocks() -> None:
+    result = _compare("Will Democrats win the Senate race?", MICHIGAN_D)
+    assert result.same_outcome_boolean is False
+    assert "location_one_sided" in result.blocking_reasons
+
+
+def test_city_is_not_mistaken_for_its_namesake_state() -> None:
+    claim = extract_claim_from_text("Highest temperature in Kansas City above 75°F?")
+    assert claim.locations == frozenset({"CITY:KANSAS_CITY"})
+    assert extract_claim_from_text("Senate race in West Virginia?").locations == frozenset({"WV"})
+    # NYC / New York fold to one token: a city-vs-state reading must not split them.
+    assert extract_claim_from_text("NYC high?").locations == extract_claim_from_text("New York high?").locations
+
+
+def test_party_detection_ignores_democratic_republic_of_congo() -> None:
+    assert extract_claim_from_text("Will the Democratic Republic of the Congo hold elections?").parties == frozenset()
+    assert extract_claim_from_text("Will the GOP keep the House?").parties == frozenset({"R"})
+
+
+def test_conflicting_people_reject_but_partial_name_does_not() -> None:
+    assert _compare("Will Trump win the 2028 election?", "Will Newsom win the 2028 election?").blocking_reasons == [
+        "named_entity_mismatch"
+    ]
+    overlap = _compare("Will Donald Trump win the 2028 election?", "Will Trump win the 2028 election?")
+    assert "named_entity_mismatch" not in overlap.blocking_reasons
+
+
+def test_title_cased_title_yields_no_named_entities() -> None:
+    assert extract_claim_from_text("Will The Democrats Win The Michigan Senate Race?").named_entities == frozenset()
+
+
+def test_titles_with_no_shared_content_word_reject() -> None:
+    result = _compare("Who will IPO before 2027?", "Will the U.S. invade Iran before 2027?")
+    assert result.same_outcome_boolean is False
+    assert "subject_tokens_disjoint" in result.blocking_reasons
+
+
+@pytest.mark.asyncio
+async def test_matcher_never_pairs_different_senate_races() -> None:
+    from tests.fixtures.match_pairs import _mk
+
+    def senate(cid: str, title: str, venue: Venue) -> Any:
+        return _mk(cid, title, venue=venue, category=Category.POLITICS, close_time=T0)
+
+    kalshi = [
+        senate(f"kalshi:senate{st}-26-{p}", f"Will {party} win the Senate race in {name}?", Venue.KALSHI)
+        for st, name in (("tx", "Texas"), ("oh", "Ohio"), ("nj", "New Jersey"), ("nh", "New Hampshire"))
+        for p, party in (("r", "Republicans"), ("d", "Democrats"))
+    ]
+    poly = [senate("poly:0xbfeb6d4c", MICHIGAN_D, Venue.POLY_GLOBAL)]
+    matches = await CrossVenueMatcher(clock=SimulatedClock(T0)).match(kalshi, poly)
+    assert matches, "the heuristic should still propose these pairs; the validator must reject them"
+    for m in matches:
+        assert m.same_outcome_boolean is False, m
+        assert m.match_confidence < Decimal("0.5")
+        assert not approved_for_automation(m)

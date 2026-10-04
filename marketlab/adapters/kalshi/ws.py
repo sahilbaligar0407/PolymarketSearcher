@@ -1,10 +1,12 @@
 """Kalshi websocket adapter: live book/trade/lifecycle feed with local book reconstruction.
 
 Connects to ``settings.sources.kalshi_ws`` (``/trade-api/ws/v2``) and subscribes to
-``orderbook_delta``, ``ticker``, ``trade`` and ``market_lifecycle`` for a caller-managed
+``orderbook_delta``, ``ticker``, ``trade`` and ``market_lifecycle_v2`` for a caller-managed
 set of tickers. A local order book is rebuilt per ticker from snapshot + deltas with
-sequence-number gap detection: a gap triggers a WARN log and a resubscribe (which causes
-Kalshi to push a fresh snapshot) rather than silently serving a stale/incorrect book.
+sequence-number gap detection. Kalshi numbers ``seq`` per subscription (``sid``), and one
+subscription spans many tickers, so gaps are tracked per sid: a gap triggers one WARN log,
+an unsubscribe of that sid and a single resubscribe of its tickers (which makes Kalshi push
+fresh snapshots) rather than silently serving a stale/incorrect book.
 
 Normalized events (``BookUpdateEvent``, ``TradeEvent``, ``MarketStatusEvent``) are pushed
 onto an ``asyncio.Queue`` supplied by the caller - this module never assumes anything
@@ -21,6 +23,7 @@ import asyncio
 import contextlib
 import json
 import random
+import time
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -39,6 +42,7 @@ from marketlab.core.events import BookUpdateEvent, MarketStatusEvent, TradeEvent
 from marketlab.core.instruments import (
     ONE,
     BookLevel,
+    MarketStatus,
     OrderBook,
     Venue,
     cents_to_probability,
@@ -50,7 +54,16 @@ from marketlab.settings import Settings
 log = get_logger(__name__)
 
 #: The subscription channels this adapter always asks for.
-_CHANNELS: tuple[str, ...] = ("orderbook_delta", "ticker", "trade", "market_lifecycle")
+#: ``market_lifecycle`` (v1) is rejected with "Unknown channel name" (checked 2026-10-04).
+_CHANNELS: tuple[str, ...] = ("orderbook_delta", "ticker", "trade", "market_lifecycle_v2")
+
+#: ``market_lifecycle_v2`` ``event_type`` values that change whether a market can trade.
+_LIFECYCLE_V2_STATUS: dict[str, MarketStatus] = {
+    "activated": MarketStatus.OPEN,
+    "deactivated": MarketStatus.PAUSED,
+    "determined": MarketStatus.CLOSED,
+    "settled": MarketStatus.SETTLED,
+}
 
 #: Kalshi caps the number of market tickers per subscribe message; chunk conservatively.
 _MAX_TICKERS_PER_MSG = 100
@@ -66,12 +79,26 @@ def _parse_price(value: object) -> Decimal:
     return to_probability(Decimal(str(value)))
 
 
+def _parse_qty(value: object) -> Decimal:
+    """Kalshi now sends fractional contract counts as strings (``delta_fp: "-33.68"``)."""
+    return Decimal(str(value))
+
+
 def _parse_size(value: object) -> int:
     return int(Decimal(str(value)).to_integral_value(rounding=ROUND_HALF_UP))
 
 
-def _parse_level_pair(pair: list) -> tuple[Decimal, int]:
-    return _parse_price(pair[0]), _parse_size(pair[1])
+def _parse_level_pair(pair: list) -> tuple[Decimal, Decimal]:
+    return _parse_price(pair[0]), _parse_qty(pair[1])
+
+
+def _first_present(body: dict, *keys: str) -> object:
+    """Kalshi renamed its WS fields (``yes`` -> ``yes_dollars_fp``, ``price`` ->
+    ``price_dollars``, ``delta`` -> ``delta_fp``); accept the legacy and current names."""
+    for key in keys:
+        if body.get(key) is not None:
+            return body[key]
+    return None
 
 
 def _ws_trade_to_raw(body: dict) -> dict:
@@ -86,16 +113,19 @@ def _ws_trade_to_raw(body: dict) -> dict:
 
 
 class _LocalBook:
-    """One ticker's reconstructed book: raw YES/NO bid ladders + the last applied seq."""
+    """One ticker's reconstructed book: raw YES/NO bid ladders, the subscription (sid)
+    feeding it, and the last applied seq on that sid. Sizes are kept exact (Kalshi
+    sends fractional counts) and rounded to whole contracts only on output."""
 
-    __slots__ = ("yes", "no", "seq")
+    __slots__ = ("yes", "no", "seq", "sid")
 
     def __init__(self) -> None:
-        self.yes: dict[Decimal, int] = {}
-        self.no: dict[Decimal, int] = {}
+        self.yes: dict[Decimal, Decimal] = {}
+        self.no: dict[Decimal, Decimal] = {}
         self.seq: int | None = None
+        self.sid: int | None = None
 
-    def reset(self, yes_levels: list, no_levels: list, seq: int | None) -> None:
+    def reset(self, yes_levels: list, no_levels: list, seq: int | None, sid: int | None) -> None:
         self.yes = {}
         self.no = {}
         for pair in yes_levels or []:
@@ -107,16 +137,12 @@ class _LocalBook:
             if s > 0:
                 self.no[p] = s
         self.seq = seq
+        self.sid = sid
 
-    def sequence_ok(self, seq: int | None) -> bool:
-        if self.seq is None or seq is None:
-            return True
-        return seq == self.seq + 1
-
-    def apply_delta(self, side: str, price_raw: object, delta: int, seq: int | None) -> None:
+    def apply_delta(self, side: str, price_raw: object, delta: Decimal, seq: int | None) -> None:
         price = _parse_price(price_raw)
         side_book = self.yes if side == "yes" else self.no
-        new_size = side_book.get(price, 0) + int(delta)
+        new_size = side_book.get(price, Decimal(0)) + delta
         if new_size <= 0:
             side_book.pop(price, None)
         else:
@@ -126,14 +152,16 @@ class _LocalBook:
     def to_orderbook(self, canonical_id: str, timestamp: datetime) -> OrderBook:
         bids = tuple(
             sorted(
-                (BookLevel(price=p, size=s) for p, s in self.yes.items()),
+                (BookLevel(price=p, size=_parse_size(s)) for p, s in self.yes.items()
+                 if _parse_size(s) > 0),
                 key=lambda lvl: lvl.price,
                 reverse=True,
             )
         )
         asks = tuple(
             sorted(
-                (BookLevel(price=to_probability(ONE - p), size=s) for p, s in self.no.items()),
+                (BookLevel(price=to_probability(ONE - p), size=_parse_size(s))
+                 for p, s in self.no.items() if _parse_size(s) > 0),
                 key=lambda lvl: lvl.price,
             )
         )
@@ -161,6 +189,7 @@ class KalshiWebSocketAdapter(Adapter):
         auth: KalshiAuth | None = None,
         tickers: Iterable[str] | None = None,
         max_queue_wait: float = 1.0,
+        min_book_interval: float = 1.0,
     ) -> None:
         self._settings = settings
         self._queue = out_queue
@@ -173,9 +202,24 @@ class KalshiWebSocketAdapter(Adapter):
             environment=env,
         )
         self._max_queue_wait = max_queue_wait
+        #: Emit at most one book per ticker per this many seconds. A live game can send
+        #: dozens of deltas a second per market, and every emitted book fans out to every
+        #: sleeve on that universe; deltas in between are folded into the next emit.
+        self._min_book_interval = min_book_interval
+        self._last_emit: dict[str, float] = {}
+        self._dirty: set[str] = set()
+        self._last_flush_scan = 0.0
 
         self._tickers: set[str] = set(tickers or ())
         self._books: dict[str, _LocalBook] = {}
+        #: Last seq seen per subscription id; Kalshi's seq is per sid, not per ticker.
+        self._sid_seq: dict[int, int] = {}
+        #: Subscriptions abandoned after a gap; their in-flight messages are ignored.
+        self._dead_sids: set[int] = set()
+        #: Tickers with a resubscribe in flight, so each one is resubscribed only once.
+        self._resyncing: set[str] = set()
+        #: sids carrying orderbook_delta; only a gap on one of these invalidates books.
+        self._book_sids: set[int] = set()
 
         self._status = SourceStatus.DISABLED
         self._last_message_at: datetime | None = None
@@ -259,6 +303,7 @@ class KalshiWebSocketAdapter(Adapter):
         self._tickers -= remove
         for t in remove:
             self._books.pop(t, None)
+            self._resyncing.discard(t)
         if self._ws is not None and remove:
             await self._send(
                 {
@@ -313,6 +358,12 @@ class KalshiWebSocketAdapter(Adapter):
             self._ws_url, additional_headers=self._connect_headers(), open_timeout=10
         ) as ws:
             self._ws = ws
+            # sids and seqs are per connection; every book is rebuilt from fresh snapshots.
+            self._books.clear()
+            self._sid_seq.clear()
+            self._dead_sids.clear()
+            self._resyncing.clear()
+            self._book_sids.clear()
             self._status = SourceStatus.HEALTHY
             self._detail = ""
             if self._tickers:
@@ -327,6 +378,7 @@ class KalshiWebSocketAdapter(Adapter):
                     log.warning("kalshi_ws_bad_json", raw=raw_msg[:200])
                     continue
                 await self._handle_message(msg)
+                await self._flush_dirty()
 
     def _next_id(self) -> int:
         self._cmd_id += 1
@@ -348,17 +400,46 @@ class KalshiWebSocketAdapter(Adapter):
                 }
             )
 
-    async def _resnapshot(self, ticker: str) -> None:
-        """Drop the local book and re-subscribe, which causes Kalshi to push a fresh
-        ``orderbook_snapshot`` for this ticker."""
-        self._books.pop(ticker, None)
-        await self._send(
-            {
-                "id": self._next_id(),
-                "cmd": "subscribe",
-                "params": {"channels": ["orderbook_delta"], "market_tickers": [ticker]},
-            }
-        )
+    def _sequence_ok(self, sid: int | None, seq: int | None) -> bool:
+        """Advance ``sid``'s seq counter; False on a gap (counter left untouched)."""
+        if sid is None or seq is None:
+            return True
+        last = self._sid_seq.get(sid)
+        if last is not None and seq != last + 1:
+            return False
+        self._sid_seq[sid] = seq
+        return True
+
+    async def _resync_sid(self, sid: int | None, ticker: str | None) -> None:
+        """Abandon subscription ``sid`` and resubscribe every ticker it was feeding, which
+        makes Kalshi push fresh ``orderbook_snapshot`` messages on a new sid."""
+        tickers = {t for t, b in self._books.items() if sid is not None and b.sid == sid}
+        if ticker:
+            tickers.add(ticker)
+        tickers -= self._resyncing
+        if sid is not None:
+            self._dead_sids.add(sid)
+            self._sid_seq.pop(sid, None)
+            await self._send(
+                {"id": self._next_id(), "cmd": "unsubscribe", "params": {"sids": [sid]}}
+            )
+        if not tickers:
+            return
+        for t in tickers:
+            self._books.pop(t, None)
+        self._resyncing |= tickers
+        ordered = sorted(tickers)
+        for i in range(0, len(ordered), _MAX_TICKERS_PER_MSG):
+            await self._send(
+                {
+                    "id": self._next_id(),
+                    "cmd": "subscribe",
+                    "params": {
+                        "channels": ["orderbook_delta"],
+                        "market_tickers": ordered[i : i + _MAX_TICKERS_PER_MSG],
+                    },
+                }
+            )
 
     # ------------------------------------------------------------------
     # Message handling
@@ -366,18 +447,37 @@ class KalshiWebSocketAdapter(Adapter):
 
     async def _handle_message(self, msg: dict) -> None:
         msg_type = msg.get("type")
-        if msg_type in ("subscribed", "ok"):
-            log.info("kalshi_ws_ack", detail=msg)
+        sid = msg.get("sid")
+        body = msg.get("msg") or {}
+        if msg_type == "subscribed" and body.get("channel") == "orderbook_delta":
+            self._book_sids.add(body.get("sid"))
+        if msg_type in ("orderbook_snapshot", "orderbook_delta") and sid is not None:
+            self._book_sids.add(sid)
+        if sid is not None and sid in self._dead_sids:
+            return
+        # Every message on a sid - including command acks ("ok", "unsubscribed") - takes
+        # a seq number, so the counter must advance on all of them, not just book data.
+        if not self._sequence_ok(sid, msg.get("seq")):
+            expected = self._sid_seq[sid] + 1
+            if sid in self._book_sids:
+                log.warning("kalshi_ws_sequence_gap", sid=sid, expected=expected, got=msg.get("seq"))
+                await self._resync_sid(sid, body.get("market_ticker"))
+                return
+            # A trade/ticker/lifecycle stream has no state to rebuild: note it and move on.
+            log.info("kalshi_ws_sequence_gap_stream", sid=sid, expected=expected, got=msg.get("seq"))
+            self._sid_seq[sid] = msg["seq"]
+        if msg_type in ("subscribed", "ok", "unsubscribed"):
+            log.debug("kalshi_ws_ack", detail=msg)
             return
         if msg_type == "error":
             self._error_count += 1
             log.warning("kalshi_ws_error_message", detail=msg)
             return
-        if msg_type == "orderbook_snapshot":
-            await self._handle_snapshot(msg)
-            return
-        if msg_type == "orderbook_delta":
-            await self._handle_delta(msg)
+        if msg_type in ("orderbook_snapshot", "orderbook_delta"):
+            if msg_type == "orderbook_snapshot":
+                await self._handle_snapshot(msg)
+            else:
+                await self._handle_delta(msg)
             return
         if msg_type == "trade":
             await self._handle_trade(msg)
@@ -394,7 +494,13 @@ class KalshiWebSocketAdapter(Adapter):
         if not ticker:
             return
         book = self._books.setdefault(ticker, _LocalBook())
-        book.reset(body.get("yes") or [], body.get("no") or [], msg.get("seq"))
+        book.reset(
+            _first_present(body, "yes_dollars_fp", "yes_dollars", "yes") or [],
+            _first_present(body, "no_dollars_fp", "no_dollars", "no") or [],
+            msg.get("seq"),
+            msg.get("sid"),
+        )
+        self._resyncing.discard(ticker)
         await self._emit_book_update(ticker, book)
 
     async def _handle_delta(self, msg: dict) -> None:
@@ -402,24 +508,22 @@ class KalshiWebSocketAdapter(Adapter):
         ticker = body.get("market_ticker")
         if not ticker:
             return
-        seq = msg.get("seq")
+        sid = msg.get("sid")
         book = self._books.get(ticker)
-        if book is None:
-            log.warning("kalshi_ws_delta_before_snapshot", ticker=ticker)
-            await self._resnapshot(ticker)
-            return
-        if not book.sequence_ok(seq):
-            log.warning(
-                "kalshi_ws_sequence_gap",
-                ticker=ticker,
-                expected=(book.seq + 1) if book.seq is not None else None,
-                got=seq,
-            )
-            await self._resnapshot(ticker)
+        if book is None or book.sid != sid:
+            if ticker in self._resyncing:
+                return  # fresh snapshot already requested; drop deltas until it lands
+            log.warning("kalshi_ws_delta_before_snapshot", ticker=ticker, sid=sid)
+            await self._resync_sid(sid, ticker)
             return
         side = body.get("side", "")
-        book.apply_delta(side, body.get("price"), int(body.get("delta", 0)), seq)
-        await self._emit_book_update(ticker, book)
+        price = _first_present(body, "price_dollars", "price")
+        delta = _first_present(body, "delta_fp", "delta")
+        if price is None or delta is None:
+            log.warning("kalshi_ws_bad_delta", ticker=ticker, body=body)
+            return
+        book.apply_delta(side, price, _parse_qty(delta), msg.get("seq"))
+        await self._book_changed(ticker, book)
 
     async def _handle_trade(self, msg: dict) -> None:
         body = msg.get("msg", {})
@@ -442,7 +546,15 @@ class KalshiWebSocketAdapter(Adapter):
         ticker = body.get("market_ticker")
         if not ticker:
             return
-        status = _map_status(body.get("status") or body.get("event") or "")
+        event_type = str(body.get("event_type") or "").lower()
+        if event_type:
+            # market_lifecycle_v2: only these change tradability; close_date_updated,
+            # metadata_updated, created etc. are not status changes.
+            status = _LIFECYCLE_V2_STATUS.get(event_type)
+            if status is None:
+                return
+        else:
+            status = _map_status(body.get("status") or body.get("event") or "")
         now = self._clock.now()
         event = MarketStatusEvent(
             event_time=now,
@@ -454,7 +566,31 @@ class KalshiWebSocketAdapter(Adapter):
         )
         await self._put(event)
 
+    async def _book_changed(self, ticker: str, book: _LocalBook) -> None:
+        last = self._last_emit.get(ticker)
+        if last is None or time.monotonic() - last >= self._min_book_interval:
+            await self._emit_book_update(ticker, book)
+        else:
+            self._dirty.add(ticker)
+
+    async def _flush_dirty(self) -> None:
+        """Emit coalesced books whose interval has passed (checked a few times a second)."""
+        if not self._dirty:
+            return
+        now = time.monotonic()
+        if now - self._last_flush_scan < min(0.25, self._min_book_interval):
+            return
+        self._last_flush_scan = now
+        for ticker in list(self._dirty):
+            book = self._books.get(ticker)
+            if book is None:
+                self._dirty.discard(ticker)
+            elif now - self._last_emit.get(ticker, 0.0) >= self._min_book_interval:
+                await self._emit_book_update(ticker, book)
+
     async def _emit_book_update(self, ticker: str, book: _LocalBook) -> None:
+        self._last_emit[ticker] = time.monotonic()
+        self._dirty.discard(ticker)
         now = self._clock.now()
         ob = book.to_orderbook(make_canonical_id(Venue.KALSHI, ticker), now)
         event = BookUpdateEvent(event_time=now, first_seen_time=now, source=self.name, book=ob)

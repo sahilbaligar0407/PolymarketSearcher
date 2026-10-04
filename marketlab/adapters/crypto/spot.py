@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import time
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -190,12 +191,16 @@ class CryptoSpotAdapter(Adapter):
         symbols: list[str],
         queue: asyncio.Queue[ExternalPriceEvent],
         clock: Clock | None = None,
+        min_interval_seconds: float = 0.0,
     ) -> None:
         """Subscribe to Coinbase's ``ticker`` channel and push events onto ``queue`` forever.
 
         Reconnects with exponential backoff (capped at 60s) on any failure. Runs until
         the calling task cancels it - there is no natural end to a live price stream.
+        ``min_interval_seconds`` passes at most one tick per symbol per interval (BTC
+        prints several times a second; every event fans out to every BTC sleeve).
         """
+        last_sent: dict[str, float] = {}
         clock = clock or self._clock
         products = [self._coinbase_product(s) for s in symbols]
         backoff = 1.0
@@ -214,6 +219,11 @@ class CryptoSpotAdapter(Adapter):
                         price_str = msg.get("price")
                         if not price_str:
                             continue
+                        symbol = str(msg.get("product_id", ""))
+                        mono = time.monotonic()
+                        if mono - last_sent.get(symbol, float("-inf")) < min_interval_seconds:
+                            continue
+                        last_sent[symbol] = mono
                         now = clock.now()
                         event = ExternalPriceEvent(
                             event_time=_parse_iso(msg.get("time")) or now,
@@ -222,7 +232,7 @@ class CryptoSpotAdapter(Adapter):
                             ingested_time=now,
                             source="coinbase_ws",
                             venue="coinbase",
-                            symbol=str(msg.get("product_id", "")),
+                            symbol=symbol,
                             price=Decimal(str(price_str)),
                         )
                         await queue.put(event)

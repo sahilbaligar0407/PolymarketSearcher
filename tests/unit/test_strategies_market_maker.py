@@ -149,3 +149,94 @@ def test_every_intent_has_rationale_and_features() -> None:
     for intent in h.intents:
         assert intent.rationale.strip()
         assert intent.features
+
+
+def test_every_shipped_variant_can_quote_a_liquid_book() -> None:
+    # The old grid, truncated by variant_limit, shipped only base_spread=0.02 arms, which
+    # the fee gate above refuses at every price - 27 sleeves, zero orders. Every arm the
+    # tournament actually runs must be able to quote a tight book at p=0.50.
+    from pathlib import Path
+
+    import yaml
+
+    from marketlab.experiments.sweep import _expand_params
+
+    cfg = yaml.safe_load((Path(__file__).parents[2] / "configs" / "strategies.yaml").read_text())
+    sdef = cfg["strategies"]["market_maker"]
+    variants = _expand_params(sdef.get("variants"), sdef.get("variant_limit"))
+    assert variants
+    for params in variants:
+        h = StrategyHarness(AvellanedaStoikovBinaryStrategy, params=params)
+        h.set_market(make_market("M1"))
+        h.feed_book(make_book("M1", [("0.49", 100)], [("0.51", 100)], h.now()))
+        assert h.intents, f"variant {params} can never quote"
+
+
+def _rest(h: StrategyHarness, intents: list) -> list[str]:
+    """Simulate the runner submitting each intent and the broker resting it."""
+    ids = []
+    for n, intent in enumerate(intents):
+        order = _open_order(f"rest-{len(h.cancels)}-{n}-{intent.action.value}", intent.canonical_id, h.now())
+        order = order.model_copy(update={"action": intent.action, "limit_price": intent.limit_price})
+        h.feed_order_update(order)
+        ids.append(order.order_id)
+    return ids
+
+
+def test_unchanged_quotes_are_left_resting_and_changed_ones_are_replaced() -> None:
+    h = StrategyHarness(AvellanedaStoikovBinaryStrategy, params={"base_spread": "0.05", "mode": "two_sided"})
+    h.set_market(make_market("M1"))
+    h.feed_book(make_book("M1", [("0.49", 100)], [("0.51", 100)], h.now()))
+    assert len(h.intents) == 2
+    first_ids = _rest(h, h.intents)
+
+    # Same book again: same quotes, so nothing is cancelled and nothing re-posted.
+    h.intents.clear()
+    h.advance(1)
+    h.feed_book(make_book("M1", [("0.49", 100)], [("0.51", 100)], h.now()))
+    assert h.intents == []
+    assert h.cancels == []
+
+    # The book moves: both resting quotes are pulled and fresh ones posted.
+    h.advance(1)
+    h.feed_book(make_book("M1", [("0.59", 100)], [("0.61", 100)], h.now()))
+    assert sorted(h.cancels) == sorted(first_ids)
+    assert len(h.intents) == 2
+
+
+def test_small_drift_waits_for_min_requote_but_then_moves() -> None:
+    h = StrategyHarness(AvellanedaStoikovBinaryStrategy, params={"base_spread": "0.05", "mode": "two_sided"})
+    h.set_market(make_market("M1"))
+    h.feed_book(make_book("M1", [("0.49", 100)], [("0.51", 100)], h.now()))
+    _rest(h, h.intents)
+
+    h.intents.clear()
+    h.advance(2)
+    h.feed_book(make_book("M1", [("0.50", 100)], [("0.52", 100)], h.now()))  # one cent of drift
+    assert h.intents == [] and h.cancels == []
+
+    h.advance(20)
+    h.feed_book(make_book("M1", [("0.50", 100)], [("0.52", 100)], h.now()))
+    assert len(h.intents) == 2 and len(h.cancels) == 2
+
+
+def test_a_rejected_quote_backs_off_instead_of_retrying_every_update() -> None:
+    h = StrategyHarness(AvellanedaStoikovBinaryStrategy, params={"base_spread": "0.05", "mode": "two_sided"})
+    h.set_market(make_market("M1"))
+    h.feed_book(make_book("M1", [("0.49", 100)], [("0.51", 100)], h.now()))
+    assert len(h.intents) == 2
+    for n, intent in enumerate(h.intents):
+        rejected = _open_order(f"rej-{n}", intent.canonical_id, h.now()).model_copy(
+            update={"status": OrderStatus.REJECTED}
+        )
+        h.feed_order_update(rejected)
+
+    h.intents.clear()
+    for _ in range(10):
+        h.advance(5)
+        h.feed_book(make_book("M1", [("0.49", 100)], [("0.51", 100)], h.now()))
+    assert h.intents == []
+
+    h.advance(120)
+    h.feed_book(make_book("M1", [("0.49", 100)], [("0.51", 100)], h.now()))
+    assert len(h.intents) == 2

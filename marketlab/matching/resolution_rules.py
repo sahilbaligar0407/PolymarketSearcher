@@ -107,6 +107,48 @@ def compare_claims(
     else:
         review_notes.append("subject entities could not be extracted on one or both sides")
 
+    # 1b. named things the acronym extractor cannot see: states/cities, parties, people.
+    #     A missing entity set used to degrade to a 0.05 review note, so "Republicans win
+    #     Texas" vs "Democrats win Michigan" scored 0.85 with same_outcome_boolean=True.
+    #     A conflict on any of these is a different bet, full stop.
+    for code, label, a_set, b_set in (
+        ("location", "location", a.locations, b.locations),
+        ("party", "party", a.parties, b.parties),
+    ):
+        if a_set and b_set and a_set != b_set:
+            diffs.append(
+                (f"{code}_mismatch", f"{label} differs: {sorted(a_set)} vs {sorted(b_set)}", _HIGH_SEVERITY)
+            )
+        elif bool(a_set) != bool(b_set):
+            diffs.append(
+                (
+                    f"{code}_one_sided",
+                    f"{label} named on only one side: {sorted(a_set)} vs {sorted(b_set)}",
+                    _MED_SEVERITY,
+                )
+            )
+    # Two titles with not one content word in common ("Who will IPO before 2027?" vs
+    # "Will the U.S. invade Iran before 2027?") are about different things; a shared
+    # year is what made them candidates in the first place.
+    if a.subject_tokens and b.subject_tokens and a.subject_tokens.isdisjoint(b.subject_tokens):
+        diffs.append(
+            (
+                "subject_tokens_disjoint",
+                f"titles share no content word: {sorted(a.subject_tokens)} vs "
+                f"{sorted(b.subject_tokens)}",
+                _HIGH_SEVERITY,
+            )
+        )
+    # Disjoint, not merely unequal: "Trump" vs "Donald Trump" must not conflict.
+    if a.named_entities and b.named_entities and a.named_entities.isdisjoint(b.named_entities):
+        diffs.append(
+            (
+                "named_entity_mismatch",
+                f"named entities disjoint: {sorted(a.named_entities)} vs {sorted(b.named_entities)}",
+                _HIGH_SEVERITY,
+            )
+        )
+
     # 2. outcome direction.
     if a.outcome != b.outcome:
         diffs.append(
@@ -245,6 +287,8 @@ def detect_complement(
     if not a.entities or a.entities != b.entities:
         return False
     if a.measurement != b.measurement:
+        return False
+    if a.locations != b.locations:
         return False
     if (
         a.resolution_authority

@@ -9,6 +9,7 @@ market that resolved while the process was down. It is the one place that gets t
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -23,6 +24,10 @@ from marketlab.daemon.registry import BookRegistry, MarketRegistry, PortfolioReg
 from marketlab.logging import get_logger
 
 log = get_logger(__name__)
+
+#: Settlement lookups in flight at once during boot recovery, and the total time allowed.
+RECONCILE_CONCURRENCY = 8
+RECONCILE_DEADLINE_SECONDS = 90.0
 
 
 @dataclass
@@ -129,36 +134,56 @@ class RecoveryService:
             if pos.quantity > 0
         }
         if self.kalshi_rest is not None:
-            for canonical_id in canonical_ids_with_positions:
-                if not canonical_id.startswith("kalshi:"):
-                    continue
-                ticker = canonical_id.split(":", 1)[1].upper()
-                try:
-                    raw = await self.kalshi_rest.get_market(ticker)
-                    market_raw = raw.get("market", raw)
-                    status = normalize_kalshi_market(market_raw).status
-                    if status is not MarketStatus.SETTLED:
-                        continue
-                    winning_side, voided = normalize_settlement(market_raw)
-                    for portfolio in self.portfolios.all().values():
-                        if any(k.startswith(canonical_id) for k in portfolio.positions):
-                            portfolio.settle(canonical_id, winning_side)
-                    if hasattr(store, "save_settlement"):
-                        from marketlab.storage.state import Settlement
+            # Bounded: the per-market lookups run a few at a time under one deadline. Run
+            # serially, hundreds of markets x 5 retried 10s requests blocked boot for hours
+            # whenever the network was down (seen 2026-10-04). Anything not reconciled here
+            # is still settled by the ingest settlements loop, which works from open
+            # positions once the daemon is up.
+            gate = asyncio.Semaphore(RECONCILE_CONCURRENCY)
 
-                        store.save_settlement(
-                            Settlement(
-                                canonical_id=canonical_id,
-                                venue=Venue.KALSHI,
-                                winning_side=winning_side,
-                                voided=voided,
-                                settled_at=self.clock.now(),
-                                first_seen_time=self.clock.now(),
-                            )
+            async def reconcile(canonical_id: str) -> None:
+                ticker = canonical_id.split(":", 1)[1].upper()
+                async with gate:
+                    try:
+                        raw = await self.kalshi_rest.get_market(ticker)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("recovery_market_reconcile_failed", canonical_id=canonical_id, error=str(exc))
+                        return
+                market_raw = raw.get("market", raw)
+                status = normalize_kalshi_market(market_raw).status
+                if status is not MarketStatus.SETTLED:
+                    return
+                winning_side, voided = normalize_settlement(market_raw)
+                for portfolio in self.portfolios.all().values():
+                    if any(k.startswith(canonical_id) for k in portfolio.positions):
+                        portfolio.settle(canonical_id, winning_side)
+                if hasattr(store, "save_settlement"):
+                    from marketlab.storage.state import Settlement
+
+                    store.save_settlement(
+                        Settlement(
+                            canonical_id=canonical_id,
+                            venue=Venue.KALSHI,
+                            winning_side=winning_side,
+                            voided=voided,
+                            settled_at=self.clock.now(),
+                            first_seen_time=self.clock.now(),
                         )
-                    summary.settled_while_down += 1
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("recovery_market_reconcile_failed", canonical_id=canonical_id, error=str(exc))
+                    )
+                summary.settled_while_down += 1
+
+            kalshi_ids = [c for c in canonical_ids_with_positions if c.startswith("kalshi:")]
+            tasks = [asyncio.ensure_future(reconcile(c)) for c in kalshi_ids]
+            if tasks:
+                _done, pending = await asyncio.wait(tasks, timeout=RECONCILE_DEADLINE_SECONDS)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    summary.notes.append(
+                        f"settlement reconcile: {len(pending)} of {len(tasks)} markets unchecked "
+                        f"after {RECONCILE_DEADLINE_SECONDS:.0f}s; the settlements loop will finish them"
+                    )
+                    log.warning("recovery_reconcile_deadline", unchecked=len(pending), total=len(tasks))
 
         log.info(
             "recovery_complete",

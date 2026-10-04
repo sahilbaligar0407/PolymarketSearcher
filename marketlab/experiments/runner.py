@@ -104,6 +104,10 @@ _FORECAST_FLUSH_THRESHOLD = 500
 #: time has passed OR the probability actually moved.
 _FORECAST_MIN_INTERVAL_SECONDS = 60.0
 _FORECAST_MIN_MOVE = Decimal("0.01")
+#: After a risk-gate rejection, the same sleeve's same (market, side, action) intent is
+#: held back this long instead of re-submitted. The gate's answer does not change tick to
+#: tick, and the retries were ~1,300 rejected order rows per strategy per 6 minutes.
+_RISK_BACKOFF_SECONDS = 60.0
 
 
 @runtime_checkable
@@ -139,6 +143,9 @@ class _Sleeve:
     stale_data_skips: int = 0
     risk_gate_skips: int = 0
     pnl_history: list[Decimal] = field(default_factory=list)
+    #: (canonical_id, side, action) -> epoch seconds until which that intent is held back.
+    risk_backoff: dict[tuple[str, str, str], float] = field(default_factory=dict)
+    risk_backoff_skips: int = 0
 
 
 @dataclass(frozen=True)
@@ -676,6 +683,15 @@ class ExperimentRunner:
                 if self._should_record_forecast(forecast):
                     self._forecast_buffer.append(forecast)
 
+            # Cancels before new intents: a requoting strategy pulls its old quotes and
+            # posts new ones in the same handler call, and the old ones must be gone
+            # before the risk gate sizes the new ones. market_maker exposes this hook;
+            # nothing drained it, so its quotes were never pulled.
+            cancel_requests = getattr(sleeve.strategy, "cancel_requests", None)
+            if callable(cancel_requests):
+                for order_id in cancel_requests():
+                    await self._cancel_order(sleeve, order_id)
+
             for intent in sleeve.strategy.generate_intents():
                 await self._submit_intent(sleeve, intent)
 
@@ -684,7 +700,25 @@ class ExperimentRunner:
         except Exception:
             self._on_sleeve_error(sleeve, event)
 
+    async def _cancel_order(self, sleeve: _Sleeve, order_id: str) -> None:
+        """Cancel one of this sleeve's own resting orders and report the result back.
+
+        The broker is shared by every sleeve, so an id from another experiment (or an
+        unknown or already-finished order) is ignored rather than cancelled.
+        """
+        order = await self.broker.get_order(order_id)
+        if order is None or order.experiment_id != sleeve.experiment_id or order.is_terminal:
+            return
+        cancelled = await self.broker.cancel(order_id)
+        if cancelled is not None:
+            sleeve.strategy.on_order_update(cancelled)
+
     async def _submit_intent(self, sleeve: _Sleeve, intent: Any) -> None:
+        key = (str(intent.canonical_id), str(intent.side), str(intent.action))
+        now_ts = self.clock.now().timestamp()
+        if sleeve.risk_backoff.get(key, 0.0) > now_ts:
+            sleeve.risk_backoff_skips += 1
+            return
         order = await self.broker.submit(intent)
         sleeve.orders_submitted += 1
         if order.status is OrderStatus.REJECTED:
@@ -693,6 +727,7 @@ class ExperimentRunner:
                 sleeve.stale_data_skips += 1
             elif order.reject_reason is RejectReason.RISK_GATE:
                 sleeve.risk_gate_skips += 1
+                sleeve.risk_backoff[key] = now_ts + _RISK_BACKOFF_SECONDS
         sleeve.strategy.on_order_update(order)
         if order.filled_quantity > 0:
             try:

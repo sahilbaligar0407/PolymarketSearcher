@@ -119,3 +119,21 @@ def test_news_suppression_blocks_entries_after_high_impact_news() -> None:
     h.advance(120)
     h.feed_book(make_book("M1", [("0.70", 100)], [("0.71", 100)], h.now()))
     assert len(h.intents) == 1
+
+
+def test_append_sample_keeps_one_entry_per_spacing() -> None:
+    from datetime import UTC, datetime, timedelta
+    from decimal import Decimal
+
+    from marketlab.strategies.base import BaseStrategy
+
+    t0 = datetime(2026, 10, 4, tzinfo=UTC)
+    history: list = []
+    for i in range(100):  # 100 updates over 10s, 0.1s apart -> two 5s buckets
+        BaseStrategy.append_sample(history, t0 + timedelta(seconds=i / 10), Decimal(i), 5.0)
+    BaseStrategy.append_sample(history, t0 + timedelta(seconds=12), Decimal("500"), 5.0)
+    assert history == [
+        (t0, Decimal(49)),
+        (t0 + timedelta(seconds=5), Decimal(99)),
+        (t0 + timedelta(seconds=12), Decimal("500")),
+    ]

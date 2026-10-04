@@ -98,8 +98,13 @@ strategies:
     evidence: B
     class: marketlab.strategies.market_maker:AvellanedaStoikovBinaryStrategy
     universes: [btc_1h, sports_nba, politics_general]
+    # base_spread must beat two taker unwind fees (the strategy's own profitability
+    # gate). A 1-contract Kalshi fee is never below 1c and is 2c between ~18c and ~82c,
+    # so 0.02 can never quote and 0.03 only quotes outside that band. With the old
+    # [0.02, 0.03, 0.05] grid, variant_limit 9 kept only the 0.02 arms (the subset is
+    # chosen by sorted parameter JSON), and 27 sleeves placed zero orders in a month.
     variants:
-      base_spread: [0.02, 0.03, 0.05]
+      base_spread: [0.05]
       inventory_penalty: [0.5, 1.0, 2.0]
       mode: [two_sided, one_sided, inventory_neutral]
       news_pause: [true]
@@ -183,6 +188,9 @@ strategies:
     # Every variant of an arm shares one inference per market, so adding entry/evidence
     # variants costs no extra model time.
     variants:
+      # Measured 2026-10-04: qwen2.5:3b (local) mostly answers 0.5 (abstained) or 0.0 at
+      # ~100% confidence, so `local` is expected to lose; `hybrid` needs the OpenAI check
+      # to agree before trading. gpt-oss:20b did not load in 8 min on this laptop.
       ai_stack: [local, hybrid, jev, jev_hybrid]
       entry_edge: [0.06, 0.10]
       min_confidence: [0.6]

@@ -656,3 +656,23 @@ async def test_daily_loss_pause_resets_on_the_next_day(tmp_path) -> None:
     )
     # ...and cumulative P&L is untouched: the sleeve's history is not rewritten.
     assert portfolio.realized_pnl == Decimal("-14.00")
+
+
+async def test_book_history_is_trimmed_but_point_in_time_lookup_still_works() -> None:
+    from datetime import timedelta
+
+    from marketlab.execution import paper_broker as pb
+
+    broker = _make_broker(
+        clock=SimulatedClock(TS),
+        market_provider=lambda cid: _market(),
+        book_provider=lambda cid: None,
+        portfolio_provider=lambda eid: _portfolio(),
+    )
+    for i in range(2000):  # one book a second for ~33 minutes
+        await broker.on_book_update(_book(ts=TS + timedelta(seconds=i)))
+    history = broker._book_history["mkt-1"]
+    assert len(history) <= pb.BOOK_HISTORY_SECONDS + 2
+    newest = TS + timedelta(seconds=1999)
+    found = broker._book_as_of("mkt-1", newest - timedelta(milliseconds=500))
+    assert found is not None and found.timestamp == newest - timedelta(seconds=1)

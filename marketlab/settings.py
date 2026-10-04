@@ -156,7 +156,7 @@ class SourcesConfig(BaseModel):
     poly_leaderboard: str = "https://data-api.polymarket.com/v1/leaderboard"
     poly_lb_legacy: str = "https://lb-api.polymarket.com"
     poly_geoblock: str = "https://polymarket.com/api/geoblock"
-    poly_us_rest: str = "https://api.polymarket.us"
+    poly_us_rest: str = "https://gateway.polymarket.us"  # keyless public API (/v1)
     gdelt_doc: str = "https://api.gdeltproject.org/api/v2/doc/doc"
     gdelt_context: str = "https://api.gdeltproject.org/api/v2/context/context"
     sec_base: str = "https://data.sec.gov"

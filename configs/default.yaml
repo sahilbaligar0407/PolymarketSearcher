@@ -27,6 +27,10 @@ ingest:
   # One orderbook call per market per cycle; keep sample x (1/interval) inside Kalshi's
   # public request budget. 120 books + 40 trade calls every 10s is ~16 req/s.
   kalshi_book_refresh_seconds: 10
+  # The Kalshi websocket can update a live market many times a second. At most one book
+  # per market per this many seconds reaches the strategies; at 1s the ~660 sleeves fell
+  # behind (event queue full, heartbeats late) on 2026-10-04.
+  kalshi_ws_book_interval_seconds: 5
   kalshi_book_sample: 120
   # Reserved book slots per universe, ahead of the open-interest ranking (which otherwise
   # always goes to sports). btc_1h coverage had halved to 18 markets once matched sports
@@ -43,6 +47,11 @@ ingest:
   # Markets pulled per Polymarket refresh (feeds the cross-venue matcher's candidate pool).
   poly_market_limit: 500
   poly_book_refresh_seconds: 15
+  # Polymarket US (keyless public gateway): best bid/ask snapshot of every open market,
+  # collected to parquet only - never traded or put in the market registry.
+  poly_us_refresh_seconds: 300
+  # ~20k markets are open (mostly sports props); 5000 keeps a poll to ~25 requests.
+  poly_us_max_markets: 5000
   poly_leaderboard_refresh_seconds: 3600
   poly_activity_refresh_seconds: 30
   gdelt_refresh_seconds: 900

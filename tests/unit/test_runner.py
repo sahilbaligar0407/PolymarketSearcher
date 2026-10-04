@@ -18,6 +18,7 @@ from marketlab.core.orders import (
     OrderIntent,
     OrderStatus,
     OrderType,
+    RejectReason,
     TimeInForce,
 )
 from marketlab.core.strategy import Strategy
@@ -587,3 +588,144 @@ def test_series_membership_is_an_exact_token_not_a_prefix() -> None:
     assert reg.universes_for("kalshi:kxbtc15m-26oct041815-15") == []  # disabled, and not "KXBTC"
     assert reg.universes_for("kalshi:kxbtc-26oct0417-b90250") == ["btc_1h"]
     assert reg.universes_for("kalshi:kxbtcd-26oct0417-t89999.99") == ["btc_1h"]
+
+
+class RequotingStrategy(Strategy):
+    """Rests one order per book update and asks to cancel the previous one, plus an id
+    that belongs to nobody - the market_maker's cancel_requests() contract."""
+
+    name = "requoting"
+    version = "1.0.0"
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.resting: list[str] = []
+        self.cancel_queue: list[str] = []
+        self.updates: list[Order] = []
+
+    def on_order_update(self, order: Order) -> None:
+        self.updates.append(order)
+        if order.status is OrderStatus.OPEN:
+            self.resting.append(order.order_id)
+
+    def cancel_requests(self) -> list[str]:
+        out, self.cancel_queue = self.cancel_queue, []
+        return out
+
+    def on_book_update(self, event: BookUpdateEvent) -> None:
+        self.cancel_queue.extend(self.resting)
+        self.cancel_queue.append("someone-elses-order")
+        self.resting = []
+        self.emit(
+            OrderIntent(
+                strategy_id=self.strategy_id,
+                experiment_id=self.experiment_id,
+                canonical_id=event.book.canonical_id,
+                venue=Venue.KALSHI,
+                side=Side.YES,
+                action=Action.BUY,
+                quantity=1,
+                order_type=OrderType.LIMIT,
+                limit_price=Decimal("0.40"),
+                time_in_force=TimeInForce.GTC,
+                decision_time=self.now(),
+                rationale="test: rest a quote",
+            )
+        )
+
+
+class RestingFakeBroker(FakeBroker):
+    """Rests every order unfilled, and really cancels."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelled: list[str] = []
+
+    async def submit(self, intent: OrderIntent) -> Order:
+        order = (await super().submit(intent)).model_copy(
+            update={"status": OrderStatus.OPEN, "filled_quantity": 0, "average_fill_price": None, "fills": ()}
+        )
+        self._orders[order.order_id] = order
+        return order
+
+    async def cancel(self, order_id: str) -> Order | None:
+        order = self._orders.get(order_id)
+        if order is None:
+            return None
+        self.cancelled.append(order_id)
+        order = order.model_copy(update={"status": OrderStatus.CANCELED})
+        self._orders[order_id] = order
+        return order
+
+
+async def test_strategy_cancel_requests_are_drained_and_sent_to_the_broker(tmp_path) -> None:
+    clock = SimulatedClock(T0)
+    runner = _make_runner(tmp_path / "c.db", {"KXBTC-TEST": {"uni_1"}}, clock)
+    broker = RestingFakeBroker()
+    runner.broker = broker
+    # Another sleeve's resting order must survive this strategy's cancel requests.
+    foreign = await broker.submit(
+        OrderIntent(
+            strategy_id="other",
+            experiment_id="OTHER_EXPERIMENT",
+            canonical_id="KXBTC-TEST",
+            venue=Venue.KALSHI,
+            side=Side.YES,
+            action=Action.BUY,
+            quantity=1,
+            order_type=OrderType.LIMIT,
+            limit_price=Decimal("0.30"),
+            time_in_force=TimeInForce.GTC,
+            decision_time=T0,
+            rationale="test: foreign order",
+        )
+    )
+    broker._orders["someone-elses-order"] = foreign.model_copy(update={"order_id": "someone-elses-order"})
+
+    await runner.load_or_create_sleeves([_variant("requoting", "tests.unit.test_runner:RequotingStrategy")])
+    strategy = next(iter(runner._sleeves.values())).strategy
+    await runner.dispatch(_book_event("KXBTC-TEST", T0))
+    first = list(strategy.resting)
+    assert len(first) == 1 and broker.cancelled == []
+
+    await runner.dispatch(_book_event("KXBTC-TEST", T0))
+    assert broker.cancelled == first
+    assert any(u.order_id == first[0] and u.status is OrderStatus.CANCELED for u in strategy.updates)
+    assert broker._orders["someone-elses-order"].status is OrderStatus.OPEN
+    runner.store.close()
+
+
+class RejectingFakeBroker(FakeBroker):
+    """Rejects every intent at the risk gate."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.submitted = 0
+
+    async def submit(self, intent: OrderIntent) -> Order:
+        self.submitted += 1
+        return (await super().submit(intent)).model_copy(
+            update={
+                "status": OrderStatus.REJECTED,
+                "filled_quantity": 0,
+                "average_fill_price": None,
+                "fills": (),
+                "reject_reason": RejectReason.RISK_GATE,
+            }
+        )
+
+
+async def test_risk_rejected_intents_back_off_instead_of_resubmitting_every_tick(tmp_path) -> None:
+    clock = SimulatedClock(T0)
+    runner = _make_runner(tmp_path / "r.db", {"KXBTC-TEST": {"uni_1"}}, clock)
+    broker = RejectingFakeBroker()
+    runner.broker = broker
+    await runner.load_or_create_sleeves([_variant("requoting", "tests.unit.test_runner:RequotingStrategy")])
+    for _ in range(10):
+        await runner.dispatch(_book_event("KXBTC-TEST", clock.now()))
+        clock.advance(5)
+    assert broker.submitted == 1
+    clock.advance(61)
+    await runner.dispatch(_book_event("KXBTC-TEST", clock.now()))
+    assert broker.submitted == 2
+    runner.store.close()

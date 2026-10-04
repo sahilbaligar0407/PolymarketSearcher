@@ -30,6 +30,7 @@ import contextlib
 import json
 import os
 import random
+import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -63,6 +64,7 @@ from marketlab.clock import Clock
 from marketlab.core.events import (
     BookUpdateEvent,
     Event,
+    ExternalPriceEvent,
     MarketStatusEvent,
     MarketUpdateEvent,
     SettlementEvent,
@@ -564,6 +566,7 @@ class IngestService:
             settings.sources.poly_leaderboard, settings.sources.poly_lb_legacy, clock
         )
         self.poly_us = PolymarketUsAdapter(settings.sources.poly_us_rest, clock)
+        self._poly_us_seen: set[str] = set()
 
         #: name -> why that adapter could not be constructed. Populated by
         #: _build_misc_adapters so `doctor` can report a wiring bug as a bug
@@ -727,7 +730,8 @@ class IngestService:
 
         if self._kalshi_ws is None:
             self._kalshi_ws = KalshiWebSocketAdapter(
-                self.settings, self.queue, clock=self.clock, tickers=tickers
+                self.settings, self.queue, clock=self.clock, tickers=tickers,
+                min_book_interval=float(self._cfg.get("kalshi_ws_book_interval_seconds", 5.0)),
             )
         return self._kalshi_ws
 
@@ -1397,6 +1401,46 @@ class IngestService:
             await self._ingest_poly_books_once(r, sample=30)
             await self.clock.sleep(interval)
 
+    async def _ingest_poly_us_once(self) -> int:
+        """Snapshot every open Polymarket US market's best bid/ask from the keyless public
+        gateway into parquet. Collection only: these markets are never put in the market
+        registry, so no strategy can see or trade them."""
+        from marketlab.adapters.polymarket_us import public as poly_us_public
+
+        cap = int(self._cfg.get("poly_us_max_markets", 3000))
+        raw_markets = await self.poly_us.iter_open_markets(cap)
+        if not raw_markets:
+            self.health.record_error("poly_us_rest", RuntimeError("no markets returned"))
+            return 0
+        now = self.clock.now()
+        meta_rows: list[dict[str, Any]] = []
+        book_rows: list[dict[str, Any]] = []
+        for raw in raw_markets:
+            slug = raw.get("slug")
+            if not slug:
+                continue
+            if slug not in self._poly_us_seen:
+                self._poly_us_seen.add(slug)
+                meta_rows.append(poly_us_public.market_metadata_row(raw, now))
+            row = poly_us_public.top_of_book_row(raw, now)
+            if row is not None:
+                book_rows.append(row)
+        await self._write_parquet("market_metadata", meta_rows)
+        await self._write_parquet("books", book_rows)
+        self.health.record_message("poly_us_rest")
+        log.info("ingest_poly_us", markets=len(raw_markets), quoted=len(book_rows), new=len(meta_rows))
+        return len(raw_markets)
+
+    async def _loop_poly_us(self) -> None:
+        interval = self._seconds("poly_us_refresh_seconds", 300)
+        while not self._stop.is_set():
+            try:
+                await self._ingest_poly_us_once()
+            except Exception as exc:  # noqa: BLE001 - an optional source must never stop
+                self.health.record_error("poly_us_rest", exc)
+                log.warning("ingest_poly_us_failed", error=str(exc))
+            await self.clock.sleep(interval)
+
     async def _loop_poly_leaderboard(self) -> None:
         interval = self._seconds("poly_leaderboard_refresh_seconds", 3600)
         while not self._stop.is_set():
@@ -1441,6 +1485,9 @@ class IngestService:
             await self.clock.sleep(interval)
 
     async def _loop_crypto_spot(self) -> None:
+        """BTC (etc.) spot for the crypto strategies. Primary: the Coinbase websocket
+        ticker, passed through at most once a second per symbol. Fallback: REST polling
+        every ``crypto_spot_refresh_seconds`` whenever the stream has been quiet for 15s."""
         from marketlab.adapters.crypto.spot import CryptoSpotAdapter
 
         raw_adapter = self._misc.get("crypto_spot")
@@ -1449,29 +1496,50 @@ class IngestService:
         adapter = raw_adapter
         interval = self._seconds("crypto_spot_refresh_seconds", 5)
         symbols = ((self.settings.universes or {}).get("reference_feeds") or {}).get("crypto_spot") or ["BTC-USD"]
-        while not self._stop.is_set():
-            for symbol in symbols:
-                try:
-                    event = await adapter.get_spot(symbol)
-                    self._enqueue(event)
-                    await self._write_parquet(
-                        "prices",
-                        [
-                            {
-                                "symbol": event.symbol,
-                                "venue": event.venue,
-                                "timestamp": event.event_time,
-                                "first_seen_time": event.first_seen_time,
-                                "price": event.price,
-                                "date": event.first_seen_time.date(),
-                            }
-                        ],
-                    )
-                    self.health.record_message("crypto_spot")
-                except Exception as exc:  # noqa: BLE001
-                    self.health.record_error("crypto_spot", exc)
-                    log.warning("ingest_crypto_spot_failed", symbol=symbol, error=str(exc))
-            await self.clock.sleep(interval)
+        stream_interval = float(self._cfg.get("crypto_spot_stream_interval_seconds", 1.0))
+        relay: asyncio.Queue[ExternalPriceEvent] = asyncio.Queue(maxsize=1000)
+        last_stream_at = [0.0]
+
+        async def consume() -> None:
+            while True:
+                event = await relay.get()
+                last_stream_at[0] = time.monotonic()
+                await self._publish_spot(event)
+
+        stream_task = asyncio.ensure_future(
+            adapter.stream(list(symbols), relay, self.clock, min_interval_seconds=stream_interval)
+        )
+        consume_task = asyncio.ensure_future(consume())
+        try:
+            while not self._stop.is_set():
+                if time.monotonic() - last_stream_at[0] > 15.0:
+                    for symbol in symbols:
+                        try:
+                            await self._publish_spot(await adapter.get_spot(symbol))
+                        except Exception as exc:  # noqa: BLE001
+                            self.health.record_error("crypto_spot", exc)
+                            log.warning("ingest_crypto_spot_failed", symbol=symbol, error=str(exc))
+                await self.clock.sleep(interval)
+        finally:
+            stream_task.cancel()
+            consume_task.cancel()
+
+    async def _publish_spot(self, event: ExternalPriceEvent) -> None:
+        self._enqueue(event)
+        await self._write_parquet(
+            "prices",
+            [
+                {
+                    "symbol": event.symbol,
+                    "venue": event.venue,
+                    "timestamp": event.event_time,
+                    "first_seen_time": event.first_seen_time,
+                    "price": event.price,
+                    "date": event.first_seen_time.date(),
+                }
+            ],
+        )
+        self.health.record_message("crypto_spot")
 
     async def _loop_weather(self) -> None:
         from marketlab.adapters.weather.nws import CITY_STATIONS, NwsAdapter
@@ -1655,6 +1723,7 @@ class IngestService:
         "poly_books": "polymarket_global",
         "poly_leaderboard": "polymarket_global",
         "poly_activity": "polymarket_global",
+        "poly_us": "polymarket_us",
         "sec": "sec",
         "crypto_spot": "crypto_spot",
         "weather_nws": "weather_nws",
@@ -1691,6 +1760,7 @@ class IngestService:
             ("poly_books", self._loop_poly_books),
             ("poly_leaderboard", self._loop_poly_leaderboard),
             ("poly_activity", self._loop_poly_activity),
+            ("poly_us", self._loop_poly_us),
             ("sec", self._loop_sec),
             ("crypto_spot", self._loop_crypto_spot),
             ("weather_nws", self._loop_weather),
