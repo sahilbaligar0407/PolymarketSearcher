@@ -314,3 +314,19 @@ own universe; lookups by id stay global.
 **44. A green test run was not a gate.** One commit in this session was pushed with two
 failing tests because the shell chain checked `tail`'s exit status rather than
 pytest's. The gate now reads pytest's own exit code.
+
+**45. The weather strategy had its station map withheld, and would have mispriced
+without it.** `configs/universes.yaml` maps each Kalshi weather series to an NWS station;
+the runner used the map to *route* weather events but never handed it to the strategy, so
+in a week it produced zero forecasts. The second bug was hiding behind the first: most
+Kalshi daily-high markets are two-degree range buckets (`-B68.5` = 68-69 F), and the
+strategy only modelled thresholds, so a bucket would have been priced as ">= 69". Same
+lesson as #37 and #39: wiring a dead path back up is when its untested logic first meets
+real data.
+
+**46. A P&L leaderboard is a survivorship filter.** Half the scored leaderboard (155 of
+300) qualified, at a median ROI of 16% and a Sharpe-like 2.6. That is not 155 skilled
+traders; the leaderboard surfaces wallets *because* their recent record is good. A
+backward-looking score cannot separate skill from a streak among survivors, so QUALIFIED
+now also requires the older and newer halves of a record to be profitable independently.
+The copy arms remain the only real forward test.
