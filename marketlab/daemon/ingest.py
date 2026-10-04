@@ -867,8 +867,25 @@ class IngestService:
         # Kalshi legs of approved cross-venue pairs always get a book; without one the
         # pair can never trade, however good the match.
         matched = [m.venue_market_id for m in self.matched_kalshi_markets.values()][:sample]
-        tickers = matched + [m.venue_market_id for m in ranked if m.venue_market_id not in set(matched)]
-        tickers = tickers[: sample + len(matched) // 2]
+        # Per-universe quotas: a global open-interest ranking always hands the book budget
+        # to sports and BTC, so thin-but-real universes (weather: 4 of 325 open markets had
+        # a book) could never be tested at all. Each quota universe gets its most active
+        # markets closing within two days.
+        reserved: list[str] = []
+        quotas: dict[str, int] = dict(self._cfg.get("book_quota_per_universe") or {"weather_daily_high": 24})
+        horizon = self.clock.now() + timedelta(days=2)
+        for universe, quota in quotas.items():
+            members = [
+                m for m in ranked
+                if universe in self.markets.universes_for(m.canonical_id)
+                and (m.close_time is None or m.close_time <= horizon)
+            ]
+            members.sort(key=lambda m: (m.volume, m.open_interest), reverse=True)
+            reserved.extend(m.venue_market_id for m in members[: int(quota)])
+        priority = list(dict.fromkeys(matched + reserved))
+        seen = set(priority)
+        tickers = priority + [m.venue_market_id for m in ranked if m.venue_market_id not in seen]
+        tickers = tickers[: sample + len(priority) // 2]
         if not tickers:
             return
         # Trades are a secondary signal and cost a second request per market, so they are
