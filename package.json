@@ -1,0 +1,15 @@
+{
+  "name": "polymarket-searcher",
+  "version": "1.0.0",
+  "description": "Collect open positions of top-performing Polymarket traders into a mega document for basket-copy analysis.",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "serve": "node server.js",
+    "collect": "node collect.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

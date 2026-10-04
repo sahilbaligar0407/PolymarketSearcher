@@ -24,3 +24,11 @@ data/marketlab.pid
 data/openai_spend.json
 data/KILL_SWITCH
 data/replay/
+# --- PolymarketSearcher (Node collector) ---
+# Claude Code workspace files
+.claude/
+# Node
+node_modules/
+# Generated data — keep the folder, ignore its contents
+/output/*
+!/output/.gitkeep

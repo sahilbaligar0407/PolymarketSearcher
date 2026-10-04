@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>POLYMARKET // SMART-MONEY MONITOR</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="no-transition">
+  <!-- top bar -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">◆</span>
+      <span class="brand-name">POLYMARKET&nbsp;<span class="brand-sub">SMART-MONEY MONITOR</span></span>
+    </div>
+    <div class="topbar-meta">
+      <span class="badge-live" id="liveBadge">LIVE</span>
+      <span class="meta-item">POOL <b id="mPool">—</b></span>
+      <span class="meta-item">SIGNALS <b id="mSignals">—</b></span>
+      <span class="meta-item">SNAPSHOT <b id="mDate">—</b></span>
+      <span class="meta-item ai" id="aiPill">AI: <b id="aiEngine">checking…</b></span>
+      <button class="btn" id="refreshBtn" title="Re-run the collector against Polymarket">↻ REFRESH DATA</button>
+    </div>
+  </header>
+
+  <!-- KPI strip -->
+  <section class="kpi-strip" id="kpiStrip">
+    <div class="kpi"><span class="kpi-label">TRACKED TRADERS</span><span class="kpi-val" id="kTraders">—</span></div>
+    <div class="kpi"><span class="kpi-label">TRACKED CAPITAL</span><span class="kpi-val" id="kCapital">—</span></div>
+    <div class="kpi"><span class="kpi-label">UNREALIZED PnL</span><span class="kpi-val" id="kPnl">—</span></div>
+    <div class="kpi"><span class="kpi-label">CONSENSUS SIGNALS</span><span class="kpi-val" id="kSignals">—</span></div>
+    <div class="kpi"><span class="kpi-label">TOP CONSENSUS</span><span class="kpi-val small" id="kTop">—</span></div>
+  </section>
+
+  <!-- main grid -->
+  <main class="grid">
+    <!-- Allocator panel -->
+    <section class="panel span2" id="allocPanel">
+      <div class="panel-header">
+        <span class="panel-title"><span class="dot"></span> AI BUDGET ALLOCATOR</span>
+        <span class="panel-count" id="allocEngineTag">heuristic</span>
+      </div>
+      <div class="panel-content">
+        <div class="alloc-controls">
+          <label class="fld">
+            <span>BANKROLL (USD)</span>
+            <input type="number" id="budget" value="500" min="1" step="10" />
+          </label>
+          <label class="fld">
+            <span>RISK PROFILE</span>
+            <select id="risk">
+              <option value="conservative">Conservative</option>
+              <option value="balanced" selected>Balanced</option>
+              <option value="aggressive">Aggressive</option>
+            </select>
+          </label>
+          <label class="fld chk">
+            <input type="checkbox" id="validate" checked />
+            <span>Web-validate (DuckDuckGo)</span>
+          </label>
+          <button class="btn primary" id="allocBtn">▶ GENERATE SPREAD</button>
+        </div>
+        <div class="briefing" id="briefing" hidden></div>
+        <div class="alloc-summary" id="allocSummary" hidden></div>
+        <div class="picks" id="picks"></div>
+        <div class="empty" id="allocEmpty">Set a bankroll and generate a spread of trades built from what the top traders agree on.</div>
+      </div>
+    </section>
+
+    <!-- Consensus signal panel -->
+    <section class="panel span2" id="signalPanel">
+      <div class="panel-header">
+        <span class="panel-title"><span class="dot green"></span> CONSENSUS SIGNAL — SHARED POSITIONS</span>
+        <span class="panel-count" id="signalCount">0</span>
+      </div>
+      <div class="panel-content">
+        <table class="tbl" id="signalTbl">
+          <thead>
+            <tr><th>#</th><th>HOLD</th><th>MARKET</th><th>SIDE</th><th class="num">PRICE</th><th class="num">AVG</th><th class="num">SMART $</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty" id="signalEmpty">No data loaded.</div>
+      </div>
+    </section>
+
+    <!-- Top traders panel -->
+    <section class="panel" id="tradersPanel">
+      <div class="panel-header">
+        <span class="panel-title"><span class="dot"></span> TOP PERFORMERS</span>
+        <span class="panel-count" id="traderCount">0</span>
+      </div>
+      <div class="panel-content">
+        <ol class="traders" id="traders"></ol>
+      </div>
+    </section>
+  </main>
+
+  <footer class="statusline">
+    <span id="statusMsg">READY</span>
+    <span class="spacer"></span>
+    <span>POLYMARKETSEARCHER · PUBLIC API · NO FINANCIAL ADVICE</span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

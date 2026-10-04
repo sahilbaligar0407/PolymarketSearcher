@@ -41,6 +41,10 @@ REAL MARKET DATA
         $50 LIVE-SMALL GATE  (hard-disabled by default)
 ```
 
+> **This repository also contains PolymarketSearcher**, the earlier Node.js top-trader
+> position collector and AI budget allocator (`collect.js`, `server.js`, `lib/`, `public/`).
+> It is independent of MarketLab; see [`docs/PolymarketSearcher.md`](docs/PolymarketSearcher.md).
+
 ## Venue policy
 
 **Kalshi is the only execution venue.** Polymarket global is a read-only intelligence
