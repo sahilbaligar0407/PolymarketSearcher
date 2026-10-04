@@ -988,33 +988,50 @@ def report_risk() -> None:
 
 
 @app.command("replay")
-def replay(date_or_dataset: str) -> None:
+def replay(
+    day: str = typer.Argument(None, help="UTC date to replay, e.g. 2026-09-12"),
+    list_dates: bool = typer.Option(False, "--list", help="List the recorded dates and exit."),
+    strategies: str = typer.Option("", "--strategies", help="Comma-separated strategy names (default: all non-AI)."),
+    tick_seconds: float = typer.Option(10.0, "--tick-seconds", help="Simulated seconds between timer ticks."),
+) -> None:
+    """Replay a recorded day's real Kalshi books through the strategies (no look-ahead)."""
+    from marketlab.experiments.replay import available_dates, run_replay
+
     settings = load_settings()
-    root = Path(settings.parquet_dir)
-    date_matches = sorted(root.glob(f"*/date={date_or_dataset}"))
-    if date_matches:
-        console.print(f"Found {len(date_matches)} dataset partition(s) for {date_or_dataset}:")
-        for m in date_matches:
-            n_files = len(list(m.glob("*.parquet")))
-            console.print(f"  {m.parent.name}: {n_files} part file(s)")
-        console.print(
-            "[dim]This reports what raw data is on disk for that date. Deterministic replay-through-the-"
-            "engine (SimulatedClock-driven backtest) is owned by the experiments/backtest harness.[/dim]"
-        )
+    dates = available_dates(Path(settings.parquet_dir))
+    if list_dates or not day:
+        console.print("Recorded dates: " + (", ".join(dates) if dates else "none yet"))
         return
+    if day not in dates:
+        console.print(f"[yellow]no recorded books for {day}[/yellow]; recorded: {', '.join(dates) or 'none'}")
+        raise typer.Exit(code=1)
+    chosen = {s.strip() for s in strategies.split(",") if s.strip()} or None
+    console.print(f"Replaying {day} ... (real recorded books, simulated clock, fresh sleeves)")
+    result = _run(run_replay(settings, day, strategies=chosen, tick_seconds=tick_seconds))
 
-    dataset_dir = root / date_or_dataset
-    if dataset_dir.exists():
-        partitions = sorted(p.name for p in dataset_dir.iterdir() if p.is_dir())
-        console.print(f"Dataset '{date_or_dataset}' has {len(partitions)} date partition(s).")
-        for p in partitions[:20]:
-            console.print(f"  {p}")
-        if len(partitions) > 20:
-            console.print(f"  ... and {len(partitions) - 20} more")
-        return
-
-    console.print(f"[yellow]no parquet data found for {date_or_dataset!r} under {root}[/yellow]")
-    raise typer.Exit(code=1)
+    table = Table(title=f"Replay {day}: top sleeves")
+    for col in ("Strategy", "Universe", "Equity", "P&L", "Trades"):
+        table.add_column(col)
+    traded = [r for r in result.leaderboard if r["trades"]]
+    for r in sorted(traded, key=lambda r: r["pnl"], reverse=True)[:25]:
+        table.add_row(r["strategy"], r["universe"], f"${r['equity']:.2f}", f"{r['pnl']:+.2f}", str(r["trades"]))
+    console.print(table)
+    families: dict[str, list[float]] = {}
+    for r in traded:
+        families.setdefault(r["strategy"], []).append(r["pnl"])
+    console.print("Family totals: " + ", ".join(
+        f"{k} {sum(v):+.2f} ({len(v)} sleeves)" for k, v in sorted(families.items(), key=lambda kv: -sum(kv[1]))
+    ))
+    out = Path(settings.data_dir) / "reports" / f"replay_{day}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({
+        "day": day, "events": result.events, "book_snapshots": result.book_snapshots,
+        "settlements": result.settlements, "sleeves": result.sleeves, "leaderboard": result.leaderboard,
+    }, indent=2), encoding="utf-8")
+    console.print(
+        f"[dim]{result.book_snapshots:,} book snapshots, {result.settlements} settlements, "
+        f"{result.sleeves} sleeves. Database: {result.db_path}. Summary: {out}[/dim]"
+    )
 
 
 # ---------------------------------------------------------------------------

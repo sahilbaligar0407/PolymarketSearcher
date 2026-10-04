@@ -168,3 +168,29 @@ system stops trading rather than trading blind.
 Optional sources are genuinely optional. Missing X credentials produce a warning and a
 disabled adapter. Missing Kalshi credentials still allow public market-data ingestion and
 full paper trading — only authenticated websocket channels and live orders are lost.
+
+## Runtime additions (2026-10)
+
+```
+ingest ──► event bus ──► runner.dispatch ──┬─► EvidenceCache (news/social/filings/trader, in memory)
+  │  Google News / GDELT (targeted)        ├─► TraderActionEvent translation (poly: -> matched Kalshi twin)
+  │  sports matcher ──► market_matches     └─► sleeves ──► RiskGateway (+ kill switch) ──► PaperBroker
+  │                         │                                                              │
+  │                         └──► MatchBook (refreshed every 5 min) ──► MatchView per sleeve │
+  │                                                                                         ▼
+  │                     AI sleeves ──(background)──► AIStack: local ─► [OpenAI 2nd opinion]   decisions table
+  ▼                                         (AssessmentCache shares one inference per market)
+dashboard (read-only, 127.0.0.1:8765) ◄── SQLite (mode=ro) + daemon_status.json
+```
+
+* **AIStack** (`marketlab/ai/stack.py`): tiers `local` (Ollama), `jev` (OpenAI-compatible
+  URL), `openai` (budget ledger in `data/openai_spend.json`). Arms: `local`, `hybrid`,
+  `jev`, `jev_hybrid`; missing tiers mean the arm is not created.
+* **Kill switch**: the file `data/KILL_SWITCH`, checked by `RiskGateway.evaluate` (stat
+  cached for 1 s). Blocks every risk-increasing order; reducing orders still pass.
+* **Match book** (`marketlab/matching/book.py`): approved pairs from storage, given to
+  `cross_venue`/`copy_trader`/`copy_basket` as a universe-filtered view.
+* **Replay** (`marketlab/experiments/replay.py`): a recorded day's Kalshi books and
+  settlements through the same runner/broker on a `SimulatedClock`, into `data/replay/`.
+* **Watchdog**: `START_TRADING.bat` restarts the daemon after any exit unless the kill
+  switch is engaged; the daemon itself starts Ollama if it is installed but not running.

@@ -245,3 +245,52 @@ genuine move is still captured.
 
 Measured after the fix: 9 MB and ~1.56M rows/day — a 40x reduction in size and 57x in row
 count, with fill behaviour unchanged.
+
+## Second tournament: what a week of live running hid (2026-10-03/04)
+
+**34. The AI layer never ran.** `news_probability` read an `llm_provider` param that
+nothing injected, and its `process_pending()` - the only path that calls a model - was
+never invoked. For the whole first tournament all 72 AI sleeves ran against
+`DisabledProvider` and abstained, so "AI vs non-AI" had no AI arm at all. The runner now
+injects a tiered stack (local / Jev / OpenAI) and drains each AI sleeve's queue in the
+background on every tick.
+
+**35. News was never ingested.** GDELT was only health-probed: no `NewsEvent` ever reached
+the event bus, and the AI evidence layer was empty. Worse, GDELT's DOC API throttled our
+targeted queries into uselessness (three 429s, then an empty 200 for "federal reserve
+rates"), while Google News RSS returned 47 stories for the same query in 0.8 s. News now
+comes from keyword queries built from each AI-universe market's own title.
+
+**36. A 3B model's "I don't know" looked like a 42-point edge.** `qwen2.5:3b` answered
+exactly `p_yes=0.50, confidence=0.9` on a Nasdaq range bucket priced at 0.075. Without a
+market price in the prompt (deliberately, to avoid anchoring) a small model defaults to a
+coin flip, and the edge arithmetic happily reads that as massive mispricing. A bare 0.50
+is now an abstain.
+
+**37. Copy trading and cross-venue were structurally dead - three separate breaks.**
+(a) The free-text matcher approved 0 of 2,372 pairs: every one lacked a stated resolution
+authority, and most compared a Kalshi *event* title against a Polymarket threshold
+contract. (b) Nothing injected `params["matches"]`, so an approved pair would have been
+invisible anyway. (c) Wallet trades arrived keyed by the `poly:` market with `side=None` for
+any outcome not literally "Yes"/"No" - i.e. every sports trade. Game-winner pairs are now
+proven structurally (178 on the first pass), delivered through a universe-filtered match
+book, and matched Polymarket buys are re-pointed at the Kalshi twin with the correct side.
+
+**38. One malformed title disabled the matcher entirely.** "13PM" parsed to hour 25 and
+`datetime()` raised, aborting the *whole* matching pass every 15 minutes since. Unparseable
+times are now "unknown". Same lesson as #16 and #32: an isolated bad record must cost only
+itself.
+
+**39. A doubleheader is two bets with one Polymarket name.** `KXMLBGAME-...DETCLEG2` (game
+2) matched the single Polymarket Tigers-Guardians market because a lenient prefix rule
+read `cleg2` as `cle`. That would have traded game 2 against game 1's price. G-suffixed and
+duplicate-slot games are now never matched.
+
+**40. The variant cap fails closed - all the way closed.** Adding sports universes pushed
+the sweep to 448 variants against `max_total_variants: 400`, and the sweep *raises* rather
+than truncating, so the daemon would have started with zero sleeves. Universes where no
+pair had ever been approved were dropped to make room instead.
+
+**41. Every trade's "why" was being discarded.** `orders` stored what happened, never the
+intent's rationale or features, so no filled trade could be explained after the fact. A
+`decisions` table now keeps them for every fill (rejections already carry their reason).
