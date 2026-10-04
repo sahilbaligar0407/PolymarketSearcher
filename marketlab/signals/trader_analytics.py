@@ -32,7 +32,9 @@ from typing import Any
 #: are judged on whether following these wallets pays on Kalshi, so a loose roster only
 #: dilutes the experiment.
 MIN_RESOLVED_FOR_QUALIFIED = 30
-MIN_SCORE_FOR_QUALIFIED = 60.0
+MIN_SCORE_FOR_QUALIFIED = 70.0
+#: Each time-half of the record must clear this ROI on its own (see split-half below).
+MIN_HALF_ROI = 0.01
 MAX_SCORE_FOR_REJECTED = 35.0
 LUCKY_SHARE = 0.5
 FAVORITE_PRICE = 0.90
@@ -142,6 +144,16 @@ def analyze_closed_positions(
     recent_staked = sum(p["stake"] for p in recent)
     recent_roi = (sum(p["pnl"] for p in recent) / recent_staked) if recent and recent_staked > 0 else None
 
+    # Split-half consistency. Leaderboard wallets are selected *because* their recent
+    # record is good, so a strong aggregate can be one hot streak. Requiring the older and
+    # newer halves to be profitable independently is a cheap guard against that.
+    half = n // 2
+    def _roi(ps: list[dict[str, Any]]) -> float:
+        st = sum(p["stake"] for p in ps)
+        return sum(p["pnl"] for p in ps) / st if st > 0 else 0.0
+    early_roi, late_roi = (_roi(positions[:half]), _roi(positions[half:])) if half else (roi, roi)
+    consistent = early_roi > MIN_HALF_ROI and late_roi > MIN_HALF_ROI
+
     cats = Counter(p["category"] for p in positions)
     top_cat, top_count = cats.most_common(1)[0]
 
@@ -176,11 +188,15 @@ def analyze_closed_positions(
         and roi > 0.01
         and largest_win_share <= LUCKY_SHARE
         and (recent_roi is None or recent_roi > -0.02)
+        and consistent
     ):
         status = "QUALIFIED"
         reasons.insert(0, f"qualified: ROI {roi:+.1%} over {n} resolved bets")
     elif score <= MAX_SCORE_FOR_REJECTED:
         status = "REJECTED"
+    elif not consistent and score >= MIN_SCORE_FOR_QUALIFIED:
+        reasons.append(f"inconsistent halves: early ROI {early_roi:+.1%}, late ROI {late_roi:+.1%}")
+        status = "TRACKING"
     else:
         status = "TRACKING"
 

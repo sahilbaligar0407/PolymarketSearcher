@@ -61,3 +61,13 @@ def test_future_records_are_ignored():
 def test_stake_is_shares_times_price():
     a = analyze_closed_positions("0x", [_pos(72.94, price=0.9526, shares=1539.79)], NOW)
     assert abs(a.total_staked - 1539.79 * 0.9526) < 0.01
+
+
+def test_one_hot_streak_is_not_consistent_edge():
+    # 40 old bets losing steadily, then 40 recent bets winning big: profitable overall,
+    # but only the recent half earns money.
+    rows = [_pos(-20, days_ago=200 - i) for i in range(40)] + [_pos(60, days_ago=40 - i * 0.5) for i in range(40)]
+    a = analyze_closed_positions("0xstreak", rows, NOW)
+    assert a.roi > 0
+    assert a.status != "QUALIFIED"
+    assert any("inconsistent halves" in r for r in a.reasons)

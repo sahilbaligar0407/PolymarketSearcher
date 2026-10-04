@@ -1479,8 +1479,8 @@ class IngestService:
 
         if self.store is None:
             return
-        interval = self._seconds("trader_scoring_seconds", 900.0)
-        batch = int(self._cfg.get("trader_scoring_batch", 25))
+        interval = self._seconds("trader_scoring_seconds", 600.0)
+        batch = int(self._cfg.get("trader_scoring_batch", 50))
         pool_size = int(self._cfg.get("trader_scoring_pool", 300))
         await self.clock.sleep(30.0)  # let the leaderboard loop record a snapshot first
         while not self._stop.is_set():
