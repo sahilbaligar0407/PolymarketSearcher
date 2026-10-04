@@ -1412,6 +1412,65 @@ class IngestService:
                     log.warning("ingest_fred_failed", series_id=series_id, error=str(exc))
             await self.clock.sleep(interval)
 
+    async def _loop_gdelt_news(self) -> None:
+        """Pull news targeted at the markets the AI arms actually assess.
+
+        GDELT used to be health-probed only, so no NewsEvent ever reached the event bus
+        and the AI evidence layer was empty for the whole first tournament. Queries are
+        built from the titles of open Kalshi markets in the AI universes, one event at a
+        time in rotation, because GDELT throttles bursts and a firehose query ("news")
+        returns nothing that is relevant to any contract.
+        """
+        from marketlab.adapters.gdelt.client import GdeltAdapter
+        from marketlab.adapters.news.google_rss import GoogleNewsSearch
+        from marketlab.ai.stack import market_keywords
+
+        gdelt = self._misc.get("gdelt")
+        gnews = GoogleNewsSearch(self.clock)
+        interval = self._seconds("news_refresh_seconds", 600.0)
+        per_cycle = int(self._cfg.get("news_queries_per_cycle", 12))
+        ai_universes = set(self._cfg.get("gdelt_universes") or (
+            "politics_general", "politics_elections", "economics_inflation", "economics_fed",
+            "economics_jobs", "economics_growth", "companies_events", "mentions",
+        ))
+        seen: set[str] = set()
+        cursor = 0
+        while not self._stop.is_set():
+            try:
+                queries: dict[str, str] = {}
+                for market in self.markets.all():
+                    if str(market.venue) != "kalshi" or str(market.status) != "open":
+                        continue
+                    if not ai_universes.intersection(self.markets.universes_for(market.canonical_id)):
+                        continue
+                    kws = [k for k in market_keywords(market) if len(k) >= 4][:3]
+                    if len(kws) >= 2:
+                        queries.setdefault(market.event_id or market.canonical_id, " ".join(kws))
+                ordered = [queries[k] for k in sorted(queries)]
+                batch = ordered[cursor:cursor + per_cycle] or ordered[:per_cycle]
+                cursor = cursor + per_cycle if cursor + per_cycle < len(ordered) else 0
+                fresh = 0
+                for query in batch:
+                    # Google News first (fast, keyless); GDELT only as a fallback.
+                    found = await gnews.search(query)
+                    if not found and isinstance(gdelt, GdeltAdapter):
+                        found = await gdelt.search(query, timespan="24h", maxrecords=25)
+                    for event in found:
+                        if event.news_id in seen:
+                            continue
+                        seen.add(event.news_id)
+                        self._enqueue(event)
+                        fresh += 1
+                    await self.clock.sleep(3.0)  # be polite to both services
+                if len(seen) > 50_000:
+                    seen.clear()
+                self.health.record_message("gdelt")
+                log.info("ingest_gdelt_news", queries=len(batch), new_articles=fresh, candidates=len(ordered))
+            except Exception as exc:  # noqa: BLE001
+                self.health.record_error("gdelt", exc)
+                log.warning("ingest_gdelt_failed", error=str(exc))
+            await self.clock.sleep(interval)
+
     async def _loop_probe_only(self, name: str, interval_key: str, default_seconds: float) -> None:
         """A source we only keep a live health signal for (X, Bluesky, sports odds,
         Alpaca, GDELT): periodic ``probe()`` calls, no deeper event pipeline yet."""
@@ -1477,6 +1536,7 @@ class IngestService:
             ("crypto_spot", self._loop_crypto_spot),
             ("weather_nws", self._loop_weather),
             ("fred", self._loop_fred),
+            ("gdelt", self._loop_gdelt_news),
         ]
         def _make_probe_loop(n: str, k: str, d: float) -> Callable[[], Awaitable[None]]:
             async def _loop() -> None:
@@ -1489,7 +1549,6 @@ class IngestService:
             ("bluesky", "social_refresh_seconds", 300.0),
             ("sports_odds", "odds_refresh_seconds", 600.0),
             ("alpaca", "kalshi_market_refresh_seconds", 300.0),
-            ("gdelt", "gdelt_refresh_seconds", 900.0),
         ):
             loops.append((probe_name, _make_probe_loop(probe_name, interval_key, default_seconds)))
 

@@ -8,6 +8,7 @@ REM  monitoring). The daemon runs under a watchdog: if it crashes or the network
 REM  it is restarted after 30s, resuming every sleeve's bankroll from the database.
 REM
 REM  PAPER ONLY. Real Kalshi order placement is hard-disabled.
+REM  (ping is the delay: `timeout` refuses to run without an interactive console.)
 REM  Emergency stop: double-click STOP_TRADING.bat (or run: uv run marketlab kill)
 REM ============================================================================
 setlocal
@@ -35,7 +36,7 @@ if errorlevel 1 (
   if exist "%LOCALAPPDATA%\Programs\Ollama\ollama.exe" (
     echo       starting Ollama...
     start "" /min "%LOCALAPPDATA%\Programs\Ollama\ollama.exe" serve
-    timeout /t 6 /nobreak >nul
+    ping -n 7 127.0.0.1 >nul
   ) else (
     echo       Ollama not found - AI arms will be skipped, everything else runs.
   )
@@ -50,7 +51,7 @@ if exist "data\KILL_SWITCH" (
 
 echo [3/4] Starting dashboard at http://127.0.0.1:8765/
 start "MarketLab dashboard" /min cmd /c "uv run marketlab dashboard --port 8765"
-timeout /t 3 /nobreak >nul
+ping -n 4 127.0.0.1 >nul
 start "" http://127.0.0.1:8765/
 
 echo [4/4] Starting the paper-trading daemon (watchdog mode)...
@@ -61,7 +62,7 @@ if exist "data\KILL_SWITCH" (
   goto end
 )
 echo Daemon exited (code %errorlevel%). Restarting in 30 seconds... (close this window to stop)
-timeout /t 30 /nobreak >nul
+ping -n 31 127.0.0.1 >nul
 goto loop
 
 :end

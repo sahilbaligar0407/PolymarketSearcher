@@ -296,3 +296,11 @@ async def test_background_inference_drains_the_queue_off_the_dispatch_path() -> 
     await asyncio.sleep(0.05)
     assert provider.call_count == 1
     assert len(strat.generate_intents()) == 1
+
+
+async def test_coin_flip_answer_is_treated_as_no_opinion() -> None:
+    provider = FakeProvider(payload=_judgement("0.50", "0.9"))
+    strat = NewsProbabilityStrategy("s1", "e1", _ctx(), params={"llm_provider": provider, "entry_edge": "0.01"})
+    await strat.evaluate_market(CANONICAL_ID)
+    assert strat.generate_intents() == []
+    assert any("uninformative_p_0.5" in f.rationale for f in strat.drain_forecasts())

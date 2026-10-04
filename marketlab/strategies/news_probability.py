@@ -104,7 +104,7 @@ class NewsProbabilityStrategy(BaseStrategy):
     """Trades a Kalshi contract against a validated LLM probability assessment."""
 
     name = "news_probability"
-    version = "2.0.0"
+    version = "2.1.0"
     evidence_class = "F"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
@@ -290,7 +290,14 @@ class NewsProbabilityStrategy(BaseStrategy):
         result = validate_assessment(parse_llm_output(payload), market, assessed.bundle, assessed.decision_time)
         if not result.valid or result.assessment_or_none is None:
             return None, result.failures
-        return result.assessment_or_none, []
+        validated = result.assessment_or_none
+        # A bare 0.50 is a small model's "I don't know", not a forecast. Measured on the
+        # first live run: qwen2.5:3b answered exactly 0.50 at confidence 0.9 on a Nasdaq
+        # range bucket priced 0.075, which reads as a 42-point edge and got traded.
+        band = Decimal(str(self.param("uninformative_band", "0.015")))
+        if not validated.abstain and abs(validated.p_yes - Decimal("0.5")) < band:
+            return None, ["uninformative_p_0.5"]
+        return validated, []
 
     async def evaluate_market(self, canonical_id: str) -> None:
         market = self.ctx.market(canonical_id)

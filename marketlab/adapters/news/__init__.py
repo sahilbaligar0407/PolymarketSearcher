@@ -1,0 +1,1 @@
+"""Keyword news search adapters."""
