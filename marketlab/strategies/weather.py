@@ -33,6 +33,7 @@ Three arms:
 from __future__ import annotations
 
 import re
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -109,6 +110,26 @@ def is_below_threshold_contract(title: str) -> bool:
     return any(k in title.lower() for k in _BELOW_KEYWORDS)
 
 
+_MONTHS = {m: i for i, m in enumerate(
+    ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"], start=1)}
+_MARKET_DATE_RE = re.compile(r"-(?P<yy>\d{2})(?P<mon>[A-Z]{3})(?P<dd>\d{2})(?:-|$)")
+
+
+def parse_market_date(ticker: str) -> date | None:
+    """The local date a daily-high contract is about: KXHIGHLAX-26OCT04-T98 -> 2026-10-04."""
+    m = _MARKET_DATE_RE.search((ticker or "").upper())
+    if m is None or m["mon"] not in _MONTHS:
+        return None
+    try:
+        return date(2000 + int(m["yy"]), _MONTHS[m["mon"]], int(m["dd"]))
+    except ValueError:
+        return None
+
+
+def _forecast_key(station: str, day: date | None) -> str:
+    return f"{station}|{day.isoformat() if day else '-'}"
+
+
 def series_prefix(ticker: str) -> str:
     return ticker.split("-")[0]
 
@@ -117,7 +138,7 @@ class WeatherForecastStrategy(BaseStrategy):
     """Prices Kalshi weather-threshold contracts against the latest NWS forecast."""
 
     name = "weather_forecast"
-    version = "1.1.0"
+    version = "1.2.0"
     evidence_class = "B"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
@@ -130,8 +151,15 @@ class WeatherForecastStrategy(BaseStrategy):
     def on_weather(self, event: WeatherEvent) -> None:
         if event.value is None:
             return
+        # Only daytime-high forecasts price a daily-high contract. The NWS feed also
+        # carries overnight lows, hourly temperatures and alerts; storing whichever
+        # arrived last compared a 66 F night low with a ">98 F high" contract and, by
+        # mixing highs and lows in the revision history, inflated sigma to 12 F.
+        if event.variable and event.variable != "temperature_forecast_day":
+            return
+        key = _forecast_key(event.station, event.forecast_for.date() if event.forecast_for else None)
         st = self._station_forecasts.setdefault(
-            event.station, {"latest": None, "issued_at": None, "forecast_for": None, "history": RollingWindow(10)}
+            key, {"latest": None, "issued_at": None, "forecast_for": None, "history": RollingWindow(10)}
         )
         previous_value = st["latest"]
         st["history"].push(float(event.value))
@@ -185,7 +213,12 @@ class WeatherForecastStrategy(BaseStrategy):
             return
         book = self.ctx.book(canonical_id)
         assert book is not None
-        forecast_state = self._station_forecasts.get(station)
+        # The forecast for the contract's own date; an undated forecast only serves
+        # undated callers (unit tests and legacy events).
+        market_date = parse_market_date(market.venue_market_id)
+        forecast_state = self._station_forecasts.get(_forecast_key(station, market_date))
+        if forecast_state is None and market_date is not None:
+            forecast_state = self._station_forecasts.get(_forecast_key(station, None))
         if forecast_state is None or forecast_state["latest"] is None:
             return
 
@@ -208,7 +241,13 @@ class WeatherForecastStrategy(BaseStrategy):
             threshold = parse_temp_threshold(market.venue_market_id, market.title)
             if threshold is None:
                 return
-            below = is_below_threshold_contract(f"{market.title} {market.description}")
+            # Kalshi writes tails as symbols (">98°", "<70°"); words are the fallback.
+            if "<" in market.title:
+                below = True
+            elif ">" in market.title:
+                below = False
+            else:
+                below = is_below_threshold_contract(f"{market.title} {market.description}")
             comparator = "<=" if below else ">="
             p_yes = forecast_to_threshold_probability(
                 float(forecast_state["latest"]), float(threshold), sigma_effective, comparator
