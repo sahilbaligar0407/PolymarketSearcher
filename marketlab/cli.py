@@ -974,6 +974,52 @@ def report_traders() -> None:
         store.close()
 
 
+@report_app.command("tournament")
+def report_tournament(top: int = typer.Option(15, "--top")) -> None:
+    """Which strategy families and sleeves are winning, and is it credible yet?"""
+    from marketlab.dashboard.server import DashboardData
+
+    settings = load_settings()
+    data = DashboardData(Path(settings.db_path), Path(settings.data_dir)).summary()
+    if "error" in data:
+        console.print(f"[red]{data['error']}[/red]")
+        raise typer.Exit(code=1)
+    p = data["portfolio"]
+    console.print(
+        f"Virtual portfolio ${p['equity']:,.2f} | cumulative P&L {p['pnl']:+,.2f} | today {p['today_pnl']:+,.2f} | "
+        f"{p['traded']}/{p['sleeves']} sleeves trading, {p['profitable']} profitable | fees ${p['fees']:,.2f}"
+    )
+    fam = Table(title="Strategy families (credible = >=30 resolved trades; control = random/fade)")
+    for col in ("Strategy", "Trading", "Total P&L", "Today", "Median", "Best", "% profitable", "Resolved", "Verdict"):
+        fam.add_column(col)
+    for f in data["families"]:
+        if not f["traded"]:
+            verdict = "no trades"
+        else:
+            verdict = ("credible" if f["credible"] else "too few trades") + (
+                "" if f["is_control"] else (", beats control" if f["beats_control"] else ", <= control")
+            )
+        share = "-" if f["share_profitable"] is None else f"{f['share_profitable']:.0%}"
+        fam.add_row(
+            f["strategy"] + (" (control)" if f["is_control"] else ""), f"{f['traded']}/{f['sleeves']}",
+            f"{f['total_pnl']:+.2f}", f"{f['today_pnl']:+.2f}", f"{f['median_pnl']:+.2f}", f"{f['best_pnl']:+.2f}",
+            share, str(f["resolved_trades"]), verdict,
+        )
+    console.print(fam)
+    best = Table(title=f"Top {top} sleeves")
+    for col in ("Strategy", "Universe", "P&L", "Max DD", "Trades", "Params"):
+        best.add_column(col)
+    for s in data["top_sleeves"][:top]:
+        dd = "-" if s["max_drawdown"] is None else f"{s['max_drawdown']:.0%}"
+        best.add_row(s["strategy"], s["universe"], f"{s['pnl']:+.2f}", dd, f"{s['trades']}/{s['resolved']}", s["params"][:60])
+    console.print(best)
+    scored = (data.get("traders") or {}).get("scored") or []
+    if scored:
+        console.print("Top Polymarket traders by TraderScore: " + ", ".join(
+            f"{t['username'] or t['wallet'][:8]} {t['score']:.0f} ({t['status']})" for t in scored[:8]
+        ))
+
+
 @report_app.command("risk")
 def report_risk() -> None:
     from marketlab.analytics.reports import risk_report

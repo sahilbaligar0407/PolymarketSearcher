@@ -10,6 +10,7 @@ material before rendering.
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import re
 import sys
 from collections.abc import MutableMapping
@@ -86,9 +87,16 @@ def configure_logging(
 
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(log_dir / "marketlab.jsonl", encoding="utf-8")
+        # Rotated: the daemon writes ~1 GB/day, and an unbounded multi-GB file is both a
+        # disk hazard on a laptop left running and too large to search when diagnosing.
+        fh = logging.handlers.RotatingFileHandler(
+            log_dir / "marketlab.jsonl", maxBytes=200 * 1024 * 1024, backupCount=20, encoding="utf-8"
+        )
         fh.setFormatter(logging.Formatter("%(message)s"))
         handlers.append(fh)
+        # The file is the audit trail; the console (captured by the launcher) only needs
+        # what an operator should look at.
+        console.setLevel(logging.WARNING)
 
     logging.basicConfig(
         format="%(message)s",
