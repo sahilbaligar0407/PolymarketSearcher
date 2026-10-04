@@ -28,6 +28,13 @@ ingest:
   # public request budget. 120 books + 40 trade calls every 10s is ~16 req/s.
   kalshi_book_refresh_seconds: 10
   kalshi_book_sample: 120
+  # Reserved book slots per universe, ahead of the open-interest ranking (which otherwise
+  # always goes to sports). btc_1h coverage had halved to 18 markets once matched sports
+  # pairs and weather took priority; btc_event, which trades it, was the day's best
+  # performer. The extra beyond kalshi_book_sample is capped at 20 per cycle (~18 req/s).
+  book_quota_per_universe:
+    btc_1h: 30
+    weather_daily_high: 16
   # The undirected /markets sweep is ~97% zero-volume parlays; keep it shallow.
   kalshi_broad_sweep_pages: 3
   kalshi_trades_refresh_seconds: 10

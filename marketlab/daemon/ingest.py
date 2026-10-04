@@ -885,7 +885,7 @@ class IngestService:
         priority = list(dict.fromkeys(matched + reserved))
         seen = set(priority)
         tickers = priority + [m.venue_market_id for m in ranked if m.venue_market_id not in seen]
-        tickers = tickers[: sample + len(priority) // 2]
+        tickers = tickers[: sample + min(len(priority) // 2, 20)]
         if not tickers:
             return
         # Trades are a secondary signal and cost a second request per market, so they are
