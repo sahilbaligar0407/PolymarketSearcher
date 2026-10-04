@@ -32,3 +32,9 @@ node_modules/
 # Generated data — keep the folder, ignore its contents
 /output/*
 !/output/.gitkeep
+
+# Kalshi API private keys - never commit
+Production.txt
+Demo.txt
+*private*key*
+*.pem
