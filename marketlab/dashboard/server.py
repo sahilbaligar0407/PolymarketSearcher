@@ -373,6 +373,21 @@ class DashboardData:
                 """,
                 (latest,),
             )
+        scored: list[dict[str, Any]] = []
+        has_scores = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trader_scores'"
+        ).fetchone()
+        if has_scores:
+            scored = _rows(
+                conn,
+                """
+                SELECT wallet, username, score, status, resolved_positions, realized_pnl, roi, win_rate,
+                       profit_factor, max_drawdown, sharpe_like, favorite_share, largest_win_share,
+                       recent_roi, top_category, reasons, computed_at
+                FROM trader_scores WHERE resolved_positions > 0 ORDER BY score DESC LIMIT 30
+                """,
+            )
+        counts = dict(conn.execute("SELECT status, COUNT(*) FROM trader_scores GROUP BY status").fetchall()) if has_scores else {}
         since = datetime.now(UTC).timestamp() - 86400
         since_iso = datetime.fromtimestamp(since, UTC).isoformat()
         consensus = _rows(
@@ -389,7 +404,7 @@ class DashboardData:
             """,
             (since_iso,),
         )
-        return {"snapshot_time": latest, "top": top, "consensus": consensus}
+        return {"snapshot_time": latest, "top": top, "scored": scored, "status_counts": counts, "consensus": consensus}
 
     def _divergences(self, conn: sqlite3.Connection) -> list[dict[str, Any]]:
         return _rows(

@@ -48,11 +48,13 @@ from marketlab.signals.copy_trader import classify_specialization
 from marketlab.signals.rolling import RollingZScore
 from marketlab.strategies.base import BaseStrategy, clamp_probability
 
-VALID_MODES = ("raw", "specialist", "high_conviction", "consensus", "early", "scale_in", "fade")
+VALID_MODES = ("raw", "specialist", "high_conviction", "consensus", "early", "scale_in", "fade", "qualified", "qualified_consensus")
 DEFAULT_MIN_OPEN_INTEREST = Decimal("1")
 DEFAULT_SIZE_Z_MIN = 2.0
 DEFAULT_MIN_AGREEING = 3
 DEFAULT_CONSENSUS_WINDOW_SECONDS = 300.0
+QUALIFIED_MIN_AGREEING = 2
+QUALIFIED_CONSENSUS_WINDOW_SECONDS = 6 * 3600.0
 #: Documented assumption: the probability-points a copy signal is believed worth, before
 #: any forward-validated, mode/wallet-specific number replaces it. Recorded in every
 #: intent's features so it is measured, never silently trusted.
@@ -92,7 +94,7 @@ class CopyTraderStrategy(BaseStrategy):
     """Follows one wallet-agnostic stream of tracked Polymarket trades onto Kalshi."""
 
     name = "copy_trader"
-    version = "1.0.0"
+    version = "1.1.0"
     evidence_class = "D"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
@@ -213,6 +215,18 @@ class CopyTraderStrategy(BaseStrategy):
         if self.mode in ("raw", "fade", "scale_in"):
             return True
 
+        if self.mode in ("qualified", "qualified_consensus"):
+            # Only wallets whose realized track record earned QUALIFIED (TraderScore).
+            # `roster` is a live mapping the runner refreshes; it is never re-derived here.
+            roster = self.param("roster", {}) or {}
+            if event.wallet not in roster:
+                self._refuse("wallet_not_qualified")
+                return False
+            if self.mode == "qualified":
+                return True
+            # qualified_consensus: >= min_agreeing distinct QUALIFIED wallets on the
+            # same Kalshi contract and side within the window - the PRD's core signal.
+
         if self.mode == "specialist":
             history = self._wallet_actions.get(event.wallet, [])
             specialization = classify_specialization(history)
@@ -241,15 +255,21 @@ class CopyTraderStrategy(BaseStrategy):
                 return False
             return True
 
-        if self.mode == "consensus":
-            window = float(self.param("consensus_window_seconds", DEFAULT_CONSENSUS_WINDOW_SECONDS))
+        if self.mode in ("consensus", "qualified_consensus"):
+            qualified = self.mode == "qualified_consensus"
+            # The QUALIFIED set is small and its members act independently over hours
+            # before an event, so its agreement window is longer and two suffice.
+            window = float(self.param(
+                "consensus_window_seconds",
+                QUALIFIED_CONSENSUS_WINDOW_SECONDS if qualified else DEFAULT_CONSENSUS_WINDOW_SECONDS,
+            ))
             key = (canonical_id, side)
             signals = self._recent_signals.setdefault(key, [])
             signals.append((event.wallet, event.first_seen_time))
             cutoff = event.first_seen_time.timestamp() - window
             signals[:] = [(w, ts) for w, ts in signals if ts.timestamp() >= cutoff]
             distinct_wallets = {w for w, _ in signals}
-            min_agreeing = int(self.param("min_agreeing", DEFAULT_MIN_AGREEING))
+            min_agreeing = int(self.param("min_agreeing", QUALIFIED_MIN_AGREEING if qualified else DEFAULT_MIN_AGREEING))
             if len(distinct_wallets) < min_agreeing:
                 self._refuse("insufficient_consensus")
                 return False
@@ -349,7 +369,7 @@ class CopyBasketStrategy(CopyTraderStrategy):
     """
 
     name = "copy_basket"
-    version = "1.0.0"
+    version = "1.1.0"
     evidence_class = "D"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
@@ -405,7 +425,30 @@ class CopyBasketStrategy(CopyTraderStrategy):
             return CopyBasketStrategy._normalize_weights(traders, "equal")
         return {w: v / total for w, v in traders.items()}
 
+    def _sync_roster(self) -> None:
+        """Follow the runner's live QUALIFIED roster: the top ``basket_size`` by score.
+
+        The roster changes only when wallets are rescored, so the basket re-forms at most
+        every ``roster_refresh_seconds``; a wallet leaving the roster stops being copied.
+        """
+        roster = self.param("roster", None)
+        if roster is None or self.on_cooldown("__roster__", float(self.param("roster_refresh_seconds", 600))):
+            return
+        self.mark_fired("__roster__")
+        size = min(int(self.param("basket_size", 10)), _MAX_BASKET_TRADERS)
+        top = sorted(roster.items(), key=lambda kv: kv[1], reverse=True)[:size]
+        traders = {w: Decimal(str(score)) for w, score in top}
+        if set(traders) != set(self._traders):
+            self._traders = traders
+            self._weights = self._normalize_weights(traders, str(self.param("weighting", "equal")))
+            log.info("copy_basket.roster", strategy_id=self.strategy_id, traders=len(traders))
+
+    def on_timer(self, event: TimerEvent) -> None:
+        self._sync_roster()
+        super().on_timer(event)
+
     def on_trader_action(self, event: TraderActionEvent) -> None:
+        self._sync_roster()
         if len(self._traders) < self._min_basket_traders:
             # Dormant: an under-filled basket is not a basket. Trading 1-4 wallets would
             # be a concentrated single-trader bet wearing a diversified label.

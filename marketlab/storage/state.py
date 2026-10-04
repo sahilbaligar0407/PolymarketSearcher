@@ -25,7 +25,7 @@ import asyncio
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -1126,6 +1126,44 @@ class StateStore:
                     _jdumps(forecast.features),
                 ),
             )
+
+    _TRADER_SCORE_COLUMNS = (
+        "wallet", "username", "computed_at", "resolved_positions", "realized_pnl", "total_staked",
+        "roi", "win_rate", "profit_factor", "max_drawdown", "sharpe_like", "trades_per_day",
+        "avg_entry_price", "favorite_share", "largest_win_share", "recent_roi", "recent_positions",
+        "top_category", "category_share", "score", "status", "reasons",
+    )
+
+    def save_trader_score(self, row: Mapping[str, Any]) -> None:
+        """Replace one wallet's TraderScore (see migrations/003_trader_scores.sql)."""
+        cols = self._TRADER_SCORE_COLUMNS
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO trader_scores ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                tuple(row.get(c) for c in cols),
+            )
+
+    def leaderboard_wallets(self, limit: int = 300, days: int = 2) -> list[tuple[str, str, int]]:
+        """(wallet, username, best rank) from recent leaderboard snapshots, best rank first."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT wallet, MAX(username), MIN(rank) AS best FROM trader_leaderboard_snapshots
+                   WHERE snapshot_time >= datetime((SELECT MAX(snapshot_time) FROM trader_leaderboard_snapshots), ?)
+                   GROUP BY wallet ORDER BY best LIMIT ?""",
+                (f"-{int(days)} days", limit),
+            ).fetchall()
+        return [(r[0], r[1] or "", int(r[2] or 0)) for r in rows]
+
+    def trader_scores(self, status: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM trader_scores"
+        params: tuple[Any, ...] = ()
+        if status is not None:
+            sql += " WHERE status = ?"
+            params = (status,)
+        sql += " ORDER BY score DESC LIMIT ?"
+        with self._lock:
+            rows = self._conn.execute(sql, (*params, limit)).fetchall()
+        return [dict(r) for r in rows]
 
     def save_decision(self, intent: Any, order: Order, experiment_id: str) -> None:
         """Persist the why behind a filled order (see migrations/002_decisions.sql)."""

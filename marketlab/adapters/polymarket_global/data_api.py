@@ -89,6 +89,13 @@ class DataApiAdapter(Adapter):
         data = await self._http.get_json("/positions", params=params)
         return _as_list(data)
 
+    async def get_closed_positions(self, wallet: str, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """Resolved positions, newest first: realizedPnl, totalBought (shares), avgPrice,
+        timestamp, slug. The realized track record TraderScore is computed from."""
+        params = {"user": wallet, "limit": limit, "offset": offset, "sortBy": "TIMESTAMP", "sortDirection": "DESC"}
+        data = await self._http.get_json("/closed-positions", params=params)
+        return _as_list(data)
+
     async def get_activity(
         self,
         wallet: str,

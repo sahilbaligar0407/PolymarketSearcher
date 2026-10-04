@@ -206,6 +206,9 @@ class ExperimentRunner:
         self._ai_skipped: Counter[str] = Counter()
         #: Approved cross-venue pairs, refreshed from storage; see marketlab.matching.book.
         self.match_book = MatchBook()
+        #: wallet -> TraderScore for QUALIFIED wallets; one live dict shared by every
+        #: copy sleeve and mutated in place on refresh.
+        self.qualified_roster: dict[str, float] = {}
         self._matches_refreshed_at: datetime | None = None
         self.trader_actions_translated = 0
         #: Shared with the broker so BOTH mutate the same Portfolio object.
@@ -291,7 +294,11 @@ class ExperimentRunner:
             if ai_params is None:
                 continue
             if variant.strategy_name in MATCH_CONSUMERS:
-                ai_params = {**ai_params, "matches": MatchView(self.match_book, variant.universe, self._universes_for)}
+                ai_params = {
+                    **ai_params,
+                    "matches": MatchView(self.match_book, variant.universe, self._universes_for),
+                    "roster": self.qualified_roster,
+                }
 
             strategy_id = f"{variant.strategy_name}__{variant.universe}__{identity_mod.parameter_hash(variant.params)}"
             strategy_version = str(getattr(strategy_cls, "version", "1.0.0"))
@@ -587,7 +594,13 @@ class ExperimentRunner:
             log.error("runner.match_refresh_failed", exc_info=True)
             return len(self.match_book)
         self.match_book.replace([m for m in rows if approved_for_automation(m)])
-        log.info("runner.matches_refreshed", approved=len(self.match_book))
+        try:
+            roster = {r["wallet"]: float(r["score"]) for r in self.store.trader_scores(status="QUALIFIED")}
+        except Exception:  # noqa: BLE001 - a store without the table simply has no roster
+            roster = dict(self.qualified_roster)
+        self.qualified_roster.clear()
+        self.qualified_roster.update(roster)
+        log.info("runner.matches_refreshed", approved=len(self.match_book), qualified_traders=len(roster))
         return len(self.match_book)
 
     def _translate_trader_action(self, event: TraderActionEvent) -> TraderActionEvent:

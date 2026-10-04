@@ -560,6 +560,10 @@ class IngestService:
         self.geoblock_result: poly_geoblock.GeoblockResult | None = None
         self.events_processed = 0
         self._tracked_wallets: set[str] = set()
+        #: TraderScore-ordered wallets (QUALIFIED first) and the QUALIFIED roster.
+        self._wallet_priority: list[str] = []
+        self.qualified_wallets: dict[str, float] = {}
+        self._activity_cursor = 0
 
     # ------------------------------------------------------------------
     # construction helpers
@@ -1023,7 +1027,15 @@ class IngestService:
             return
         activity_ok = 0
         rows_out: list[dict[str, Any]] = []
-        for wallet in list(self._tracked_wallets)[:n_wallets]:
+        # Rotate through every tracked wallet instead of re-polling the same first few,
+        # always including the top QUALIFIED wallets so their trades are seen quickly.
+        ordered = self._wallet_priority + [w for w in self._tracked_wallets if w not in set(self._wallet_priority)]
+        top = [w for w in ordered if w in self.qualified_wallets][: max(1, n_wallets // 2)]
+        rest = [w for w in ordered if w not in set(top)]
+        start = self._activity_cursor % max(len(rest), 1)
+        picked = top + (rest[start:] + rest[:start])[: n_wallets - len(top)]
+        self._activity_cursor += n_wallets - len(top)
+        for wallet in picked:
             try:
                 async for event in self.poly_data.iter_trader_actions(wallet, page_size=10, max_pages=1):
                     self._enqueue(event)
@@ -1455,6 +1467,60 @@ class IngestService:
                     log.warning("ingest_fred_failed", series_id=series_id, error=str(exc))
             await self.clock.sleep(interval)
 
+    async def _loop_trader_scoring(self) -> None:
+        """Score leaderboard wallets from their realized track records (TraderScore).
+
+        Wallets come from the recorded leaderboard snapshots, best rank first; each pass
+        rescores the stalest ``trader_scoring_batch`` of them. The QUALIFIED set then
+        drives which wallets' live activity is polled first, and who the copy-basket arms
+        may follow. Nothing here can place an order.
+        """
+        from marketlab.signals.trader_analytics import analyze_closed_positions
+
+        if self.store is None:
+            return
+        interval = self._seconds("trader_scoring_seconds", 900.0)
+        batch = int(self._cfg.get("trader_scoring_batch", 25))
+        pool_size = int(self._cfg.get("trader_scoring_pool", 300))
+        await self.clock.sleep(30.0)  # let the leaderboard loop record a snapshot first
+        while not self._stop.is_set():
+            try:
+                pool = self.store.leaderboard_wallets(limit=pool_size)
+                scored = {r["wallet"]: r["computed_at"] for r in self.store.trader_scores(limit=10_000)}
+                # Never-scored wallets first, then the stalest.
+                todo = sorted(pool, key=lambda r: (r[0] in scored, scored.get(r[0], "")))[:batch]
+                done = 0
+                for wallet, username, _best in todo:
+                    rows: list[dict[str, Any]] = []
+                    for offset in range(0, 200, 50):
+                        page = await self.poly_data.get_closed_positions(wallet, limit=50, offset=offset)
+                        rows.extend(page)
+                        await self.clock.sleep(0.5)
+                        if len(page) < 50:
+                            break
+                    analysis = analyze_closed_positions(wallet, rows, self.clock.now(), username or "")
+                    self.store.save_trader_score(analysis.as_row())
+                    done += 1
+                self._refresh_wallet_priority()
+                log.info("trader_scoring", scored=done, pool=len(pool), qualified=len(self.qualified_wallets))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("trader_scoring_failed", error=str(exc), exc_info=True)
+            await self.clock.sleep(interval)
+
+    def _refresh_wallet_priority(self) -> None:
+        if self.store is None:
+            return
+        rows = self.store.trader_scores(limit=10_000)
+        self.qualified_wallets = {r["wallet"]: float(r["score"]) for r in rows if r["status"] == "QUALIFIED"}
+        rejected = {r["wallet"] for r in rows if r["status"] == "REJECTED"}
+        ranked = [r["wallet"] for r in rows if r["wallet"] not in rejected]
+        # QUALIFIED first (by score), then the remaining leaderboard wallets.
+        self._wallet_priority = [w for w in ranked if w in self.qualified_wallets] + [
+            w for w in ranked if w not in self.qualified_wallets
+        ]
+        self._tracked_wallets.update(self._wallet_priority)
+        self._tracked_wallets.difference_update(rejected)
+
     async def _loop_gdelt_news(self) -> None:
         """Pull news targeted at the markets the AI arms actually assess.
 
@@ -1583,6 +1649,7 @@ class IngestService:
             ("weather_nws", self._loop_weather),
             ("fred", self._loop_fred),
             ("gdelt", self._loop_gdelt_news),
+            ("trader_scoring", self._loop_trader_scoring),
         ]
         def _make_probe_loop(n: str, k: str, d: float) -> Callable[[], Awaitable[None]]:
             async def _loop() -> None:

@@ -264,8 +264,23 @@
     ], d.ai_decisions, "No AI assessments yet. The AI arms assess each market at most hourly.");
 
     const t = d.traders || {};
-    document.getElementById("traders-sub").textContent = "Latest public leaderboard snapshot" + (t.snapshot_time ? " · " + ago(t.snapshot_time) : "") + ". Leaderboard rank is not proof of edge; the tracker forward-tests wallets before trusting them.";
-    table("traders", [
+    document.getElementById("traders-sub").textContent = "Latest public leaderboard snapshot" + (t.snapshot_time ? " · " + ago(t.snapshot_time) : "") + ". Leaderboard rank is not proof of edge.";
+    if (t.scored && t.scored.length) {
+      const c = t.status_counts || {};
+      document.getElementById("traders-sub").textContent =
+        `TraderScore from each wallet's realized closed positions. ${c.QUALIFIED || 0} qualified · ${c.TRACKING || 0} tracking · ${c.REJECTED || 0} rejected. Hover a score for the reasons.`;
+      table("traders", [
+        { h: "Trader", f: (r) => esc(r.username || r.wallet.slice(0, 10) + "…") },
+        { h: "Score", num: 1, f: (r) => `<span title="${esc(r.reasons)}">${Number(r.score).toFixed(0)}</span>` },
+        { h: "Status", f: (r) => `<span class="tag ${r.status === "QUALIFIED" ? "good" : r.status === "REJECTED" ? "bad" : ""}">${esc(r.status)}</span>` },
+        { h: "Bets", num: 1, f: (r) => r.resolved_positions },
+        { h: "ROI", num: 1, f: (r) => pct(r.roi) },
+        { h: "Win", num: 1, f: (r) => pct(r.win_rate) },
+        { h: "PF", num: 1, f: (r) => r.profit_factor == null ? "∞" : Number(r.profit_factor).toFixed(2) },
+        { h: "30d ROI", num: 1, f: (r) => pct(r.recent_roi) },
+        { h: "Luck", num: 1, f: (r) => `<span class="${r.largest_win_share > 0.5 ? "neg" : "muted"}">${pct(r.largest_win_share)}</span>` },
+      ], t.scored, "No wallets scored yet.");
+    } else table("traders", [
       { h: "Trader", f: (r) => esc(r.username || r.wallet.slice(0, 10) + "…") },
       { h: "Reported P&L", num: 1, f: (r) => r.pnl == null ? "–" : "$" + Math.round(r.pnl).toLocaleString() },
       { h: "Volume", num: 1, f: (r) => r.volume == null ? "–" : "$" + Math.round(r.volume).toLocaleString() },

@@ -211,9 +211,16 @@ strategies:
     class: marketlab.strategies.copy_trader:CopyTraderStrategy
     # Signals come from Polymarket wallets; execution is on the matched Kalshi contract.
     universes: [sports_mlb, sports_nfl, sports_college, sports_nhl, sports_nba, politics_general]
+    # Wallet activity is polled every ~30 s, so a 1-5 s follow delay was never
+    # achievable; 30 s and 120 s are. Modes (2026-10-04):
+    #   raw                  copy every tracked leaderboard wallet
+    #   consensus            >= 2 tracked wallets, same contract and side, within the window
+    #   qualified            only wallets whose realized record is QUALIFIED (TraderScore)
+    #   qualified_consensus  >= 2 QUALIFIED wallets agreeing - the PRD's core signal
+    #   fade                 the deliberate opposite of raw: a control
     variants:
-      follower_delay_seconds: [1, 5, 30, 120]
-      mode: [raw, specialist, consensus, high_conviction, early, scale_in, fade]
+      follower_delay_seconds: [30, 120]
+      mode: [raw, consensus, qualified, qualified_consensus, fade]
     variant_limit: 10
     notes: >
       follower_delay_seconds=0 is deliberately absent from the grid: a zero-latency copy

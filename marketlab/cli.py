@@ -1010,7 +1010,7 @@ def replay(
     result = _run(run_replay(settings, day, strategies=chosen, tick_seconds=tick_seconds))
 
     table = Table(title=f"Replay {day}: top sleeves")
-    for col in ("Strategy", "Universe", "Equity", "P&L", "Trades"):
+    for col in ("Strategy", "Category", "Equity", "P&L", "Trades"):
         table.add_column(col)
     traded = [r for r in result.leaderboard if r["trades"]]
     for r in sorted(traded, key=lambda r: r["pnl"], reverse=True)[:25]:

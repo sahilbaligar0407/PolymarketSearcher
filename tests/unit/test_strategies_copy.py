@@ -305,3 +305,43 @@ def test_copy_basket_only_follows_member_wallets() -> None:
     intents = strat.generate_intents()
     assert len(intents) == 1
     assert intents[0].venue is Venue.KALSHI
+
+
+
+# ---------------------------------------------------------------------------
+# TraderScore-driven modes
+# ---------------------------------------------------------------------------
+
+
+def test_qualified_mode_copies_only_roster_wallets() -> None:
+    roster = {WALLET: 80.0}
+    strat = CopyTraderStrategy("s", "e", _ctx(_book("0.09", "0.11")),
+                               params={"mode": "qualified", "roster": roster, "follower_delay_seconds": 5})
+    strat.on_trader_action(_trader_action(wallet="0xSTRANGER"))
+    assert strat.refusal_counts.get("wallet_not_qualified") == 1
+    strat.on_trader_action(_trader_action())
+    assert len(strat._pending_copies) == 1
+
+
+def test_qualified_consensus_needs_two_qualified_wallets() -> None:
+    roster = {WALLET: 80.0, "0xSECOND": 70.0}
+    strat = CopyTraderStrategy("s", "e", _ctx(_book("0.09", "0.11")),
+                               params={"mode": "qualified_consensus", "roster": roster, "follower_delay_seconds": 5})
+    strat.on_trader_action(_trader_action())
+    assert strat._pending_copies == []
+    strat.on_trader_action(_trader_action(wallet="0xNOTQUALIFIED"))
+    assert strat._pending_copies == []
+    strat.on_trader_action(_trader_action(wallet="0xSECOND"))
+    assert len(strat._pending_copies) == 1
+
+
+def test_basket_follows_the_live_roster() -> None:
+    roster: dict[str, float] = {}
+    ctx = _ctx(_book("0.09", "0.11"))
+    basket = CopyBasketStrategy("s", "e", ctx, params={"roster": roster, "basket_size": 5, "follower_delay_seconds": 5})
+    basket.on_timer(TimerEvent(event_time=TS, first_seen_time=TS))
+    assert basket._traders == {}
+    roster.update({f"0xW{i}": 60.0 + i for i in range(8)})
+    ctx.clock.advance(601)
+    basket.on_timer(TimerEvent(event_time=TS, first_seen_time=TS))
+    assert set(basket._traders) == {f"0xW{i}" for i in range(3, 8)}  # top 5 by score
