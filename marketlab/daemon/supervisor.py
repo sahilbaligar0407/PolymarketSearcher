@@ -26,13 +26,14 @@ import asyncio
 import contextlib
 import json
 import signal
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from marketlab.ai.provider import LLMProvider, detect_provider
+from marketlab.ai.stack import AIStack, build_ai_stack
 from marketlab.clock import Clock, LiveClock
 from marketlab.core.broker import Broker, Mode
 from marketlab.core.events import (
@@ -143,9 +144,57 @@ class SupervisorStatus:
     trading_detail: str
     last_heartbeat: str
     feed_health: dict[str, Any]
+    ai: dict[str, Any] = field(default_factory=dict)
+    risk_rejects: dict[str, int] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(self.__dict__, indent=2)
+
+
+async def _ensure_ollama_running(base_url: str) -> None:
+    """Start a local Ollama server if one is installed but not answering.
+
+    The watchdog restarts the daemon after a reboot or crash; the local AI tier should
+    come back with it rather than staying dark until someone starts Ollama by hand.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    import httpx
+
+    async def _up() -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=3) as client:
+                return (await client.get(f"{base_url.rstrip('/')}/api/tags")).status_code == 200
+        except httpx.HTTPError:
+            return False
+
+    if await _up():
+        return
+    exe = shutil.which("ollama")
+    if exe is None and os.name == "nt":
+        candidate = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
+        exe = str(candidate) if candidate.exists() else None
+    if exe is None:
+        log.warning("ollama_not_installed", detail="local AI tier will abstain")
+        return
+    flags = 0
+    if os.name == "nt":
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "DETACHED_PROCESS", 0)
+    try:
+        subprocess.Popen(  # noqa: S603, ASYNC220 - fire-and-forget detached server
+            [exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags
+        )
+    except OSError as exc:
+        log.warning("ollama_start_failed", error=str(exc))
+        return
+    for _ in range(20):
+        await asyncio.sleep(1.5)
+        if await _up():
+            log.info("ollama_started", exe=exe)
+            return
+    log.warning("ollama_start_timeout", detail="continuing; local tier abstains until it answers")
 
 
 class Supervisor:
@@ -169,6 +218,7 @@ class Supervisor:
         self._raw_broker: Broker | None = None
         self.broker: _HealthGatedBroker | None = None
         self.runner: Any | None = None
+        self.ai_stack: AIStack | None = None
         self.variants: list[Any] = []
 
         self.started_at: datetime | None = None
@@ -190,6 +240,7 @@ class Supervisor:
         self.store = StateStore.open(self.settings.db_path)
         self.async_store = AsyncStateStore(self.store)
         self.parquet = AsyncParquetWriter(ParquetWriter(self.settings.parquet_dir))
+        await _ensure_ollama_running(self.settings.sources.ollama_base)
         self.ai_provider = await detect_provider(self.settings)
         log.info("ai_provider_ready", provider=self.ai_provider.name, model=self.ai_provider.model)
 
@@ -209,6 +260,14 @@ class Supervisor:
         self.risk_gateway = RiskGateway(self.settings.risk)
         self._raw_broker = await self._build_broker(acknowledge_real_money_risk)
         self.broker = _HealthGatedBroker(self._raw_broker, self.health, self.clock)
+
+        try:
+            self.ai_stack = await build_ai_stack(
+                self.settings, self.ai_provider, self.clock, self.market_registry.get
+            )
+        except Exception as exc:  # noqa: BLE001 - the AI layer is an enrichment, never a dependency
+            log.error("ai_stack_build_failed", error=str(exc), exc_info=True)
+            self.ai_stack = None
 
         self.variants = self._generate_variants()
         self.runner = await self._build_runner()
@@ -344,6 +403,7 @@ class Supervisor:
                 self.market_registry,
                 self.book_registry,
                 ai_provider=self.ai_provider,
+                ai_stack=self.ai_stack,
                 portfolio_registry=self.portfolio_registry,
             )
         except Exception as exc:  # noqa: BLE001
@@ -574,7 +634,24 @@ class Supervisor:
             trading_detail=trading_detail,
             last_heartbeat=now.isoformat(),
             feed_health=feed_health,
+            ai=self._ai_status(),
+            risk_rejects=dict(self.risk_gateway.reject_counts) if self.risk_gateway is not None else {},
         )
+
+    def _ai_status(self) -> dict[str, Any]:
+        if self.ai_stack is None:
+            return {"tiers": {}, "arms": []}
+        out: dict[str, Any] = {
+            "tiers": {k: f"{v.name}:{v.model}" for k, v in self.ai_stack.providers.items()},
+            "arms": self.ai_stack.available_stacks(),
+            "evidence": self.ai_stack.evidence.sizes(),
+        }
+        openai = self.ai_stack.providers.get("openai")
+        ledger = getattr(openai, "ledger", None)
+        if ledger is not None:
+            out["openai_spent_today_usd"] = str(ledger.spent_today())
+            out["openai_daily_cap_usd"] = str(ledger.daily_cap)
+        return out
 
     def _status_path(self) -> Path:
         return self.settings.data_dir / "daemon_status.json"
@@ -650,6 +727,11 @@ class Supervisor:
         if self.ai_provider is not None:
             with contextlib.suppress(Exception):
                 await self.ai_provider.close()
+        if self.ai_stack is not None:
+            for provider in self.ai_stack.providers.values():
+                if provider is not self.ai_provider:
+                    with contextlib.suppress(Exception):
+                        await provider.close()
         if self.store is not None:
             with contextlib.suppress(Exception):
                 self.store.close()

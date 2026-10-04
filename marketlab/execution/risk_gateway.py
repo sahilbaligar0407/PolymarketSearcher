@@ -22,8 +22,10 @@ directly:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 
 from marketlab.core.instruments import (
     EXECUTION_VENUES,
@@ -36,7 +38,13 @@ from marketlab.core.instruments import (
 )
 from marketlab.core.orders import Action, OrderIntent, RejectReason
 from marketlab.core.portfolio import Portfolio
-from marketlab.settings import RiskConfig
+from marketlab.settings import DATA_DIR, RiskConfig
+
+#: The global kill switch. While this file exists every risk-increasing order is refused,
+#: by every strategy, in every mode. `marketlab kill` / STOP_TRADING.bat create it;
+#: `marketlab unkill` removes it. A file, not a flag in memory, so it survives restarts and
+#: can be pulled by hand from Explorer if everything else is wedged.
+KILL_SWITCH_PATH = DATA_DIR / "KILL_SWITCH"
 
 #: How much a BUY may add to the cost basis of an already-underwater position (as a
 #: fraction of that position's current cost basis) before it counts as "martingale"
@@ -90,13 +98,24 @@ def _estimate_price(intent: OrderIntent, book: OrderBook | None) -> Decimal:
 class RiskGateway:
     """Evaluates one intent against a portfolio and the configured :class:`RiskConfig`."""
 
-    def __init__(self, config: RiskConfig) -> None:
+    def __init__(self, config: RiskConfig, kill_switch_path: Path | None = None) -> None:
         self.config = config
+        self.kill_switch_path = kill_switch_path or KILL_SWITCH_PATH
+        self._kill_checked_at = float("-inf")
+        self._kill_engaged = False
         #: Per-check rejection counters, keyed by a short check name (not RejectReason,
         #: since several checks share RISK_GATE - this is what actually distinguishes them
         #: for metrics/dashboards).
         self.reject_counts: dict[str, int] = {}
         self.approved_count = 0
+
+    def kill_switch_engaged(self) -> bool:
+        # One stat() per second at most: evaluate() runs for every intent of every sleeve.
+        now = time.monotonic()
+        if now - self._kill_checked_at >= 1.0:
+            self._kill_engaged = self.kill_switch_path.exists()
+            self._kill_checked_at = now
+        return self._kill_engaged
 
     def _reject(self, check: str, reason: RejectReason, detail: str) -> RiskDecision:
         self.reject_counts[check] = self.reject_counts.get(check, 0) + 1
@@ -113,6 +132,14 @@ class RiskGateway:
         daily_pnl: Decimal,
     ) -> RiskDecision:
         cfg = self.config
+
+        # --- Global kill switch: overrides every strategy, model and config. -----
+        if self.kill_switch_engaged() and not _is_reducing(intent, portfolio):
+            return self._reject(
+                "kill_switch",
+                RejectReason.RISK_GATE,
+                f"global kill switch engaged ({self.kill_switch_path.name} present); no new risk",
+            )
 
         # --- Hard block: never reachable by configuration, ever. -----------------
         if intent.venue not in EXECUTION_VENUES:

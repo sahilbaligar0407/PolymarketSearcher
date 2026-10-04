@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MarketLab Tournament</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #14171c; --muted: #5d6673; --line: #e3e6eb;
+    --pos: #0f7b4b; --neg: #c0362c; --warn: #a86400; --accent: #2457c5; --chip: #eef1f5;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1216; --panel: #171b21; --ink: #e7eaee; --muted: #9aa3ae; --line: #262c34;
+      --pos: #3ecf8e; --neg: #ff6b5e; --warn: #f0b44c; --accent: #7aa2ff; --chip: #20262e;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1216; --panel: #171b21; --ink: #e7eaee; --muted: #9aa3ae; --line: #262c34;
+    --pos: #3ecf8e; --neg: #ff6b5e; --warn: #f0b44c; --accent: #7aa2ff; --chip: #20262e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 18px 24px 8px; display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: baseline; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 15px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 12.5px; margin: 0 0 10px; }
+  main { padding: 8px 24px 40px; display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+            grid-column: span 12; min-width: 0; }
+  .half { grid-column: span 6; }
+  @media (max-width: 1000px) { .half { grid-column: span 12; } main, header { padding-left: 16px; padding-right: 16px; } }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-weight: 600; font-size: 12px; background: var(--chip); }
+  .pill.ok { color: var(--pos); } .pill.bad { color: var(--neg); } .pill.warn { color: var(--warn); }
+  .meta { color: var(--muted); font-size: 12.5px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .kpi .label { color: var(--muted); font-size: 12px; }
+  .kpi .value { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); } .muted { color: var(--muted); }
+  .tag { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 6px; background: var(--chip); color: var(--muted); margin-right: 4px; }
+  .tag.good { color: var(--pos); } .tag.bad { color: var(--neg); } .tag.warn { color: var(--warn); }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .clip { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  details summary { cursor: pointer; list-style: none; }
+  details summary::-webkit-details-marker { display: none; }
+  .why { margin: 8px 0 4px; padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--bg); border-radius: 6px; font-size: 13px; }
+  .why dt { color: var(--muted); font-size: 12px; margin-top: 6px; } .why dd { margin: 0; }
+  .empty { color: var(--muted); padding: 10px 0; font-size: 13px; }
+  .feeds { display: flex; flex-wrap: wrap; gap: 6px; }
+  .theme { margin-left: auto; background: var(--chip); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+  .error { color: var(--neg); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MarketLab Tournament</h1>
+  <span id="state" class="pill">loading…</span>
+  <span id="killsw"></span>
+  <span class="meta" id="meta"></span>
+  <button class="theme" id="theme" type="button">Theme</button>
+</header>
+<main>
+  <section style="background:transparent;border:0;padding:0"><div class="kpis" id="kpis"></div></section>
+
+  <section>
+    <h2>Strategy leaderboard</h2>
+    <p class="sub">Each family runs many $50 sleeves on real Kalshi books with fake money. A family is <b>credible</b> at ≥30 resolved trades and <b>beats control</b> when its median sleeve beats the random/fade controls.</p>
+    <div class="table-wrap"><table id="families"></table></div>
+  </section>
+
+  <section class="half">
+    <h2>Top sleeves</h2>
+    <p class="sub">Best individual strategy variants by P&amp;L.</p>
+    <div class="table-wrap"><table id="sleeves"></table></div>
+  </section>
+
+  <section class="half">
+    <h2>System</h2>
+    <p class="sub">Feeds, AI tiers and risk gate.</p>
+    <div id="system"></div>
+  </section>
+
+  <section>
+    <h2>Recent simulated trades</h2>
+    <p class="sub">Click a row for the explanation: trigger, support, edge, evidence, risk checks and outcome.</p>
+    <div class="table-wrap"><table id="trades"></table></div>
+  </section>
+
+  <section class="half">
+    <h2>Open positions</h2>
+    <div class="table-wrap"><table id="positions"></table></div>
+  </section>
+
+  <section class="half">
+    <h2>AI / Jev decisions</h2>
+    <p class="sub">Latest assessments from the AI arms (local model, Jev, OpenAI second opinion).</p>
+    <div class="table-wrap"><table id="ai"></table></div>
+  </section>
+
+  <section class="half">
+    <h2>Elite Polymarket traders</h2>
+    <p class="sub" id="traders-sub">Latest public leaderboard snapshot.</p>
+    <div class="table-wrap"><table id="traders"></table></div>
+  </section>
+
+  <section class="half">
+    <h2>Trader consensus (24h)</h2>
+    <p class="sub">Polymarket outcomes bought by ≥2 tracked wallets.</p>
+    <div class="table-wrap"><table id="consensus"></table></div>
+  </section>
+
+  <section class="half">
+    <h2>Polymarket ↔ Kalshi matches</h2>
+    <div class="table-wrap"><table id="matches"></table></div>
+  </section>
+
+  <section class="half">
+    <h2>Rejected opportunities</h2>
+    <p class="sub">Why recent orders were refused (last 20k orders).</p>
+    <div class="table-wrap"><table id="rejects"></table></div>
+  </section>
+
+  <section>
+    <h2>Alerts</h2>
+    <div class="table-wrap"><table id="alerts"></table></div>
+  </section>
+</main>
+<script>
+(function () {
+  const root = document.documentElement;
+  try { const t = localStorage.getItem("ml-theme"); if (t) root.dataset.theme = t; } catch (e) {}
+  document.getElementById("theme").onclick = () => {
+    const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("ml-theme", root.dataset.theme); } catch (e) {}
+  };
+
+  const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const money = (v) => v == null ? "–" : (v < 0 ? "-$" : "$") + Math.abs(v).toFixed(2);
+  const signed = (v) => v == null ? "–" : `<span class="${v > 0 ? "pos" : v < 0 ? "neg" : "muted"}">${v > 0 ? "+" : ""}${money(v)}</span>`;
+  const pct = (v) => v == null ? "–" : (v * 100).toFixed(1) + "%";
+  const prob = (v) => v == null ? "–" : (v * 100).toFixed(0) + "%";
+  const ago = (iso) => {
+    if (!iso) return "–";
+    const s = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (s < 90) return Math.round(s) + "s ago";
+    if (s < 5400) return Math.round(s / 60) + "m ago";
+    if (s < 172800) return Math.round(s / 3600) + "h ago";
+    return Math.round(s / 86400) + "d ago";
+  };
+  const dur = (s) => s == null ? "–" : s < 3600 ? Math.round(s / 60) + "m" : s < 172800 ? (s / 3600).toFixed(1) + "h" : (s / 86400).toFixed(1) + "d";
+
+  function table(id, cols, rows, emptyMsg) {
+    const el = document.getElementById(id);
+    if (!rows || !rows.length) { el.innerHTML = `<tr><td class="empty">${esc(emptyMsg || "Nothing yet.")}</td></tr>`; return; }
+    el.innerHTML = "<thead><tr>" + cols.map((c) => `<th class="${c.num ? "num" : ""}">${esc(c.h)}</th>`).join("") + "</tr></thead><tbody>" +
+      rows.map((r) => "<tr>" + cols.map((c) => `<td class="${c.num ? "num" : ""}${c.cls ? " " + c.cls : ""}">${c.f(r)}</td>`).join("") + "</tr>").join("") + "</tbody>";
+  }
+
+  function render(d) {
+    const st = d.status || {};
+    const state = document.getElementById("state");
+    state.textContent = st.running ? "RUNNING · " + (st.mode || "PAPER") : "STOPPED";
+    state.className = "pill " + (st.running ? (st.trading_allowed === false ? "warn" : "ok") : "bad");
+    document.getElementById("killsw").innerHTML = st.kill_switch ? '<span class="pill bad">KILL SWITCH ENGAGED</span>' : "";
+    const ai = st.ai || {};
+    const spend = ai.openai_spent_today_usd != null ? ` · OpenAI $${Number(ai.openai_spent_today_usd).toFixed(4)} / $${ai.openai_daily_cap_usd} today` : "";
+    document.getElementById("meta").innerHTML =
+      `uptime ${dur(st.uptime_seconds)} · heartbeat ${st.heartbeat_age_seconds == null ? "–" : Math.round(st.heartbeat_age_seconds) + "s"} · ` +
+      `${(st.markets_tracked ?? 0).toLocaleString()} markets · ${(st.orders_submitted ?? 0).toLocaleString()} orders this run${esc(spend)} · updated ${ago(d.generated_at)}` +
+      (st.trading_allowed === false ? ` · <span class="error">trading paused: ${esc(st.trading_detail)}</span>` : "") +
+      (d.error ? ` · <span class="error">${esc(d.error)}</span>` : "");
+
+    const p = d.portfolio || {};
+    document.getElementById("kpis").innerHTML = [
+      ["Virtual portfolio", money(p.equity)],
+      ["Cumulative P&L", signed(p.pnl)],
+      ["Today's P&L (UTC)", signed(p.today_pnl)],
+      ["Sleeves trading", `${p.traded ?? 0} <span class="muted" style="font-size:14px">/ ${p.sleeves ?? 0}</span>`],
+      ["Profitable sleeves", `${p.profitable ?? 0} <span class="muted" style="font-size:14px">/ ${p.traded ?? 0}</span>`],
+      ["Fees paid", money(p.fees)],
+    ].map(([l, v]) => `<div class="kpi"><div class="label">${l}</div><div class="value">${v}</div></div>`).join("");
+
+    table("families", [
+      { h: "Strategy", f: (r) => esc(r.strategy) + (r.is_control ? ' <span class="tag">control</span>' : "") },
+      { h: "Sleeves", num: 1, f: (r) => `${r.traded}/${r.sleeves}` },
+      { h: "Total P&L", num: 1, f: (r) => signed(r.total_pnl) },
+      { h: "Today", num: 1, f: (r) => signed(r.today_pnl) },
+      { h: "Median", num: 1, f: (r) => signed(r.median_pnl) },
+      { h: "Best", num: 1, f: (r) => signed(r.best_pnl) },
+      { h: "% profitable", num: 1, f: (r) => pct(r.share_profitable) },
+      { h: "Resolved", num: 1, f: (r) => r.resolved_trades },
+      { h: "Fees", num: 1, f: (r) => money(r.fees) },
+      { h: "Verdict", f: (r) => !r.traded ? '<span class="tag">no trades</span>' :
+          (r.credible ? '<span class="tag good">credible</span>' : '<span class="tag warn">too few trades</span>') +
+          (r.is_control ? "" : r.beats_control ? '<span class="tag good">beats control</span>' : '<span class="tag bad">≤ control</span>') },
+    ], d.families);
+
+    table("sleeves", [
+      { h: "Sleeve", f: (r) => `${esc(r.strategy)} <span class="muted">· ${esc(r.universe)}</span><div class="muted mono clip" title="${esc(r.params)}">${esc(r.params)}</div>` },
+      { h: "Equity", num: 1, f: (r) => money(r.equity) },
+      { h: "P&L", num: 1, f: (r) => signed(r.pnl) },
+      { h: "Today", num: 1, f: (r) => signed(r.today_pnl) },
+      { h: "Max DD", num: 1, f: (r) => pct(r.max_drawdown) },
+      { h: "Trades", num: 1, f: (r) => `${r.trades}<span class="muted">/${r.resolved}</span>` },
+    ], d.top_sleeves, "No sleeve has traded yet.");
+
+    const feeds = Object.entries(st.feeds || {}).map(([n, f]) =>
+      `<span class="tag ${f.status === "healthy" ? "good" : f.required ? "bad" : "warn"}" title="${esc(f.detail)}">${esc(n)}: ${esc(f.status)}</span>`).join("");
+    const tiers = Object.entries(ai.tiers || {}).map(([k, v]) => `<span class="tag good">${esc(k)}: ${esc(v)}</span>`).join("") || '<span class="tag bad">no AI tier</span>';
+    const rr = Object.entries(st.risk_rejects || {}).sort((a, b) => b[1] - a[1]).slice(0, 8)
+      .map(([k, v]) => `<span class="tag">${esc(k)}: ${v.toLocaleString()}</span>`).join("") || '<span class="muted">none this run</span>';
+    const ev = ai.evidence ? Object.entries(ai.evidence).map(([k, v]) => `${k} ${v}`).join(" · ") : "–";
+    document.getElementById("system").innerHTML =
+      `<dl class="why" style="border-left-color:var(--line)"><dt>Data feeds</dt><dd class="feeds">${feeds || "–"}</dd>` +
+      `<dt>AI tiers</dt><dd class="feeds">${tiers}</dd><dt>AI arms running</dt><dd>${esc((ai.arms || []).join(", ") || "–")}</dd>` +
+      `<dt>Live evidence cache</dt><dd>${esc(ev)}</dd><dt>Risk-gate refusals this run</dt><dd class="feeds">${rr}</dd></dl>`;
+
+    const trades = document.getElementById("trades");
+    const tr = d.recent_trades || [];
+    if (!tr.length) { trades.innerHTML = '<tr><td class="empty">No fills recorded with explanations yet.</td></tr>'; }
+    else {
+      trades.innerHTML = "<thead><tr><th>When</th><th>Strategy</th><th>Market</th><th>Side</th><th class='num'>Price</th><th class='num'>Qty</th><th>Outcome</th><th class='num'>Result</th></tr></thead><tbody>" +
+        tr.map((r, i) => `<tr><td>${ago(r.time)}</td><td>${esc(r.strategy)}</td>
+          <td><details><summary class="clip" title="${esc(r.market)}">${esc(r.market)}</summary>
+            <dl class="why"><dt>What triggered it / who supported it</dt><dd>${esc(r.rationale)}</dd>
+            <dt>Price edge</dt><dd>model p ${prob(r.model_probability)} · expected edge ${r.expected_edge == null ? "–" : (r.expected_edge * 100).toFixed(1) + " pts"} after fees · paid ${r.price}</dd>
+            <dt>Independent evidence</dt><dd>${r.evidence.length ? r.evidence.map(esc).join("<br>") : '<span class="muted">none recorded</span>'}</dd>
+            ${r.second_opinion ? `<dt>Second opinion</dt><dd>${esc(r.second_opinion)}</dd>` : ""}
+            <dt>Risk checks</dt><dd>${esc(r.risk)}</dd>
+            <dt>What happened afterwards</dt><dd>${esc(r.outcome)}${r.realized != null ? " · " + signed(r.realized) : ""}</dd>
+            <dt>Market</dt><dd class="mono">${esc(r.canonical_id)}</dd></dl></details></td>
+          <td>${esc(r.action)} ${esc(r.side)}</td><td class="num">${r.price.toFixed(2)}</td><td class="num">${r.quantity}</td>
+          <td><span class="tag ${r.outcome === "won" ? "good" : r.outcome === "lost" ? "bad" : ""}">${esc(r.outcome)}</span></td>
+          <td class="num">${r.realized == null ? "–" : signed(r.realized)}</td></tr>`).join("") + "</tbody>";
+    }
+
+    table("positions", [
+      { h: "Strategy", f: (r) => esc(r.strategy) },
+      { h: "Market", cls: "clip", f: (r) => `<span title="${esc(r.market)}">${esc(r.market)}</span>` },
+      { h: "Side", f: (r) => esc(r.side) },
+      { h: "Qty", num: 1, f: (r) => r.quantity },
+      { h: "Avg", num: 1, f: (r) => r.avg_price == null ? "–" : r.avg_price.toFixed(2) },
+      { h: "Closes", f: (r) => r.closes ? new Date(r.closes).toLocaleString() : "–" },
+    ], d.open_positions, "No open positions.");
+
+    table("ai", [
+      { h: "When", f: (r) => ago(r.time) },
+      { h: "Arm", f: (r) => `<span class="tag">${esc(r.stack || "?")}</span>` },
+      { h: "Market", cls: "clip", f: (r) => `<span title="${esc(r.why)}">${esc(r.market)}</span>` },
+      { h: "Model p", num: 1, f: (r) => r.abstain ? '<span class="muted">abstain</span>' : prob(r.p_yes) },
+      { h: "Market p", num: 1, f: (r) => prob(r.market_p) },
+      { h: "Conf", num: 1, f: (r) => r.abstain ? "–" : prob(r.confidence) },
+      { h: "Note", cls: "clip", f: (r) => `<span class="muted" title="${esc(r.failures.join("; "))}">${esc(r.failures.join("; ") || r.model)}</span>` },
+    ], d.ai_decisions, "No AI assessments yet. The AI arms assess each market at most hourly.");
+
+    const t = d.traders || {};
+    document.getElementById("traders-sub").textContent = "Latest public leaderboard snapshot" + (t.snapshot_time ? " · " + ago(t.snapshot_time) : "") + ". Leaderboard rank is not proof of edge; the tracker forward-tests wallets before trusting them.";
+    table("traders", [
+      { h: "Trader", f: (r) => esc(r.username || r.wallet.slice(0, 10) + "…") },
+      { h: "Reported P&L", num: 1, f: (r) => r.pnl == null ? "–" : "$" + Math.round(r.pnl).toLocaleString() },
+      { h: "Volume", num: 1, f: (r) => r.volume == null ? "–" : "$" + Math.round(r.volume).toLocaleString() },
+      { h: "Boards", cls: "clip", f: (r) => `<span class="muted">${esc(r.categories || "")}</span>` },
+    ], t.top, "No leaderboard snapshot yet.");
+    table("consensus", [
+      { h: "Market", cls: "clip", f: (r) => `<span title="${esc(r.title)}">${esc(r.title)}</span>` },
+      { h: "Outcome", f: (r) => esc(r.outcome) },
+      { h: "Wallets", num: 1, f: (r) => r.wallets },
+      { h: "USD", num: 1, f: (r) => r.usd == null ? "–" : "$" + Number(r.usd).toLocaleString() },
+      { h: "Kalshi match", f: (r) => r.kalshi_match ? '<span class="tag good">matched</span>' : '<span class="tag">none</span>' },
+    ], t.consensus, "No multi-wallet consensus in the last 24h.");
+
+    table("matches", [
+      { h: "Kalshi", cls: "clip", f: (r) => `<span title="${esc(r.kalshi)}">${esc(r.kalshi_title || r.kalshi)}</span>` },
+      { h: "Polymarket", cls: "clip", f: (r) => `<span title="${esc(r.polymarket)}">${esc(r.poly_title || r.polymarket)}</span>` },
+      { h: "Conf", num: 1, f: (r) => prob(r.confidence) },
+      { h: "Status", f: (r) => r.needs_review ? '<span class="tag warn">review</span>' : r.same_outcome ? '<span class="tag good">same bet</span>' : '<span class="tag">differs</span>' },
+    ], d.divergences, "No cross-venue matches yet.");
+
+    table("rejects", [
+      { h: "Reason", f: (r) => `<span class="tag">${esc(r.reason)}</span>` },
+      { h: "Detail", cls: "clip", f: (r) => `<span class="muted" title="${esc(r.detail)}">${esc(r.detail)}</span>` },
+      { h: "Count", num: 1, f: (r) => r.n.toLocaleString() },
+    ], d.rejections, "No rejections.");
+
+    table("alerts", [
+      { h: "When", f: (r) => ago(r.timestamp) },
+      { h: "Severity", f: (r) => `<span class="tag ${r.severity === "critical" || r.severity === "error" ? "bad" : "warn"}">${esc(r.severity)}</span>` },
+      { h: "Component", f: (r) => esc(r.component) },
+      { h: "Message", f: (r) => esc(r.message) },
+    ], d.alerts, "No alerts.");
+  }
+
+  async function refresh() {
+    try {
+      const r = await fetch("/api/summary", { cache: "no-store" });
+      render(await r.json());
+    } catch (e) {
+      const s = document.getElementById("state");
+      s.textContent = "DASHBOARD OFFLINE"; s.className = "pill bad";
+    }
+  }
+  refresh();
+  setInterval(refresh, 30000);
+})();
+</script>
+</body>
+</html>

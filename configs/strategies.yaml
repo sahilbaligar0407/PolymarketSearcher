@@ -169,11 +169,24 @@ strategies:
     evidence: F
     class: marketlab.strategies.news_probability:NewsProbabilityStrategy
     universes: [politics_general, economics_inflation, economics_fed, companies_events]
+    # AI stack arms (marketlab/ai/stack.py). This is the PRD's "AI-enhanced vs
+    # Jev-enhanced vs non-AI" comparison:
+    #   local       - local Ollama model only
+    #   hybrid      - local model, confirmed by an OpenAI second opinion before trading
+    #                 (budget-capped by OPENAI_DAILY_BUDGET_USD; out of budget => no trade)
+    #   jev         - Jev only            (created only when JEV_BASE_URL is set)
+    #   jev_hybrid  - Jev + OpenAI check  (created only when JEV_BASE_URL is set)
+    # Every variant of an arm shares one inference per market, so adding entry/evidence
+    # variants costs no extra model time.
     variants:
-      entry_edge: [0.05, 0.08, 0.12]
-      min_confidence: [0.5, 0.7]
-      multi_pass: [false]
-    variant_limit: 6
+      ai_stack: [local, hybrid, jev, jev_hybrid]
+      entry_edge: [0.06, 0.10]
+      min_confidence: [0.6]
+      # 0 = the model may lean on background knowledge alone; 1 = needs live evidence.
+      min_evidence_items: [0, 1]
+      scheduled_refresh_seconds: [3600]
+      max_markets_per_pass: [3]
+    variant_limit: 16
     requires_ai: true
 
   public_statement_event:

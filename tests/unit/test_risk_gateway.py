@@ -350,3 +350,31 @@ def test_approved_intent_passes_clean():
     assert decision.approved
     assert decision.reason is None
     assert gw.approved_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Global kill switch
+# ---------------------------------------------------------------------------
+
+
+def test_kill_switch_blocks_new_risk_but_allows_reducing(tmp_path):
+    switch = tmp_path / "KILL_SWITCH"
+    gw = RiskGateway(RiskConfig(), kill_switch_path=switch)
+    portfolio = _portfolio()
+    assert gw.evaluate(_intent(quantity=1), portfolio, _market(), _book(), {}, {}, Decimal("0")).approved
+
+    switch.write_text("test")
+    gw._kill_checked_at = float("-inf")  # bypass the 1s stat cache
+    decision = gw.evaluate(_intent(quantity=1), portfolio, _market(), _book(), {}, {}, Decimal("0"))
+    assert not decision.approved
+    assert gw.reject_counts.get("kill_switch") == 1
+
+    portfolio.positions[Portfolio.key("mkt-1", Side.YES)] = Position(
+        canonical_id="mkt-1", side=Side.YES, quantity=5, average_price=Decimal("0.40")
+    )
+    reducing = _intent(action=Action.SELL, quantity=5, limit_price=Decimal("0.40"))
+    assert gw.evaluate(reducing, portfolio, _market(), _book(), {}, {}, Decimal("0")).approved
+
+    switch.unlink()
+    gw._kill_checked_at = float("-inf")
+    assert gw.evaluate(_intent(quantity=1), _portfolio(), _market(), _book(), {}, {}, Decimal("0")).approved

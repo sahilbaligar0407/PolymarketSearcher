@@ -55,6 +55,16 @@ class Secrets(BaseSettings):
     local_llm_base_url: str = ""
     local_llm_model: str = ""
 
+    #: Remote second-opinion tier. Hard-capped per UTC day; 0 disables it entirely.
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4.1-nano"
+    openai_daily_budget_usd: str = "0.02"
+
+    #: Jev: any OpenAI-compatible endpoint. Unset URL => no Jev arms are created.
+    jev_base_url: str = ""
+    jev_api_key: str = ""
+    jev_model: str = ""
+
     live_trading_enabled: str = "NO"
 
     #: SEC rejects any User-Agent lacking a contact email (its bot filter 403s on the
@@ -69,7 +79,10 @@ class Secrets(BaseSettings):
         """Presence map for `marketlab doctor`. Values are never included."""
         out: dict[str, str] = {}
         for name in type(self).model_fields:
-            if name in {"marketlab_mode", "local_llm_provider", "kalshi_environment"}:
+            if name in {
+                "marketlab_mode", "local_llm_provider", "kalshi_environment",
+                "openai_model", "openai_daily_budget_usd", "jev_model",
+            }:
                 out[name] = str(getattr(self, name))
                 continue
             value = str(getattr(self, name) or "")

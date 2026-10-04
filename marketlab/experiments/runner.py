@@ -182,6 +182,7 @@ class ExperimentRunner:
         book_registry: BookRegistryLike,
         ai_provider: Any | None = None,
         *,
+        ai_stack: Any | None = None,
         portfolio_registry: Any | None = None,
         max_consecutive_failures: int = 10,
         broker_owns_portfolio: bool = True,
@@ -193,6 +194,10 @@ class ExperimentRunner:
         self.market_registry = market_registry
         self.book_registry = book_registry
         self.ai_provider = ai_provider
+        #: The tiered AI runtime (see marketlab.ai.stack). Without one, AI sleeves fall
+        #: back to the single ``ai_provider`` with no escalation and no shared caches.
+        self.ai_stack = ai_stack
+        self._ai_skipped: Counter[str] = Counter()
         #: Shared with the broker so BOTH mutate the same Portfolio object.
         #:
         #: The broker looks a sleeve's portfolio up by experiment_id through its
@@ -272,6 +277,10 @@ class ExperimentRunner:
             if strategy_cls is None:
                 continue
 
+            ai_params = self._ai_params(variant)
+            if ai_params is None:
+                continue
+
             strategy_id = f"{variant.strategy_name}__{variant.universe}__{identity_mod.parameter_hash(variant.params)}"
             strategy_version = str(getattr(strategy_cls, "version", "1.0.0"))
             identity = self._build_identity(variant, strategy_version)
@@ -334,7 +343,9 @@ class ExperimentRunner:
                     strategy_id=strategy_id,
                     experiment_id=experiment.experiment_id,
                     ctx=self._ctx,
-                    params=variant.params,
+                    # Live collaborators ride alongside the declared params but never
+                    # enter variant.params, which is hashed into the experiment identity.
+                    params={**variant.params, **ai_params},
                 )
             except Exception as exc:  # noqa: BLE001
                 log.error(
@@ -427,10 +438,48 @@ class ExperimentRunner:
             )
             return None
 
+    def _ai_params(self, variant: VariantSpec) -> dict[str, Any] | None:
+        """Collaborators for an AI sleeve; ``{}`` for a non-AI one; None = cannot run.
+
+        An arm whose tiers are not configured (no Jev URL, no OpenAI budget) is skipped
+        before registration, so it never appears on the leaderboard as a sleeve that
+        merely "never traded".
+        """
+        if not variant.requires_ai:
+            return {}
+        if self.ai_stack is None:
+            return {"llm_provider": self.ai_provider} if self.ai_provider is not None else {}
+        stack_name = str(variant.params.get("ai_stack", "local"))
+        resolved = self.ai_stack.resolve(stack_name)
+        if resolved is None:
+            if self._ai_skipped[stack_name] == 0:
+                log.info("runner.ai_arm_unavailable", ai_stack=stack_name,
+                         detail="a required AI tier is not configured; arm not created")
+            self._ai_skipped[stack_name] += 1
+            return None
+        primary, escalation = resolved
+        return {
+            "llm_provider": primary,
+            "escalation_provider": escalation,
+            "assessment_cache": self.ai_stack.assessments,
+            "retrieval_store": self.ai_stack.evidence,
+        }
+
+    def _llm_model_id(self, variant: VariantSpec) -> str | None:
+        if not variant.requires_ai:
+            return None
+        if self.ai_stack is not None:
+            resolved = self.ai_stack.resolve(str(variant.params.get("ai_stack", "local")))
+            if resolved is not None:
+                primary, escalation = resolved
+                ids = [f"{primary.name}:{primary.model}"]
+                if escalation is not None:
+                    ids.append(f"{escalation.name}:{escalation.model}")
+                return "+".join(ids)
+        return getattr(self.ai_provider, "model", None) if self.ai_provider is not None else None
+
     def _build_identity(self, variant: VariantSpec, strategy_version: str) -> ExperimentIdentity:
-        llm_model_id = None
-        if variant.requires_ai and self.ai_provider is not None:
-            llm_model_id = getattr(self.ai_provider, "model", None)
+        llm_model_id = self._llm_model_id(variant)
         return ExperimentIdentity(
             strategy_name=variant.strategy_name,
             strategy_version=strategy_version,
@@ -513,6 +562,9 @@ class ExperimentRunner:
 
     async def dispatch(self, event: BaseEvent) -> None:
         self._update_caches(event)
+        if self.ai_stack is not None:
+            with contextlib.suppress(Exception):
+                self.ai_stack.evidence.record(event)
         targets = self._target_universes(event)
         handler_name = _EVENT_HANDLER_NAMES.get(event.event_type)
         for sleeve in list(self._sleeves.values()):
@@ -559,6 +611,11 @@ class ExperimentRunner:
             elif order.reject_reason is RejectReason.RISK_GATE:
                 sleeve.risk_gate_skips += 1
         sleeve.strategy.on_order_update(order)
+        if order.filled_quantity > 0:
+            try:
+                self.store.save_decision(intent, order, sleeve.experiment_id)
+            except Exception:  # noqa: BLE001 - the audit record must never break trading
+                log.error("runner.decision_persist_failed", order_id=order.order_id, exc_info=True)
         for fill in order.fills:
             before = sleeve.portfolio.realized_pnl
             if not self.broker_owns_portfolio:
@@ -622,9 +679,27 @@ class ExperimentRunner:
         await self.dispatch(
             TimerEvent(event_time=now, first_seen_time=now, interval_seconds=self.settings.paper.tick_seconds)
         )
+        self._start_ai_inference()
         self._flush_forecasts()
         if self._last_snapshot is None or (now - self._last_snapshot).total_seconds() >= self.settings.paper.snapshot_seconds:
             await self.snapshot()
+
+    def _start_ai_inference(self) -> None:
+        """Let AI sleeves drain their inference queues in the background.
+
+        Inference is slow (seconds to minutes) so it is never awaited here; the intents
+        it produces are submitted on the sleeve's next dispatch.
+        """
+        for sleeve in self._sleeves.values():
+            if sleeve.status in _INACTIVE_STATUSES:
+                continue
+            start = getattr(sleeve.strategy, "start_background_inference", None)
+            if start is None:
+                continue
+            try:
+                start()
+            except Exception:  # noqa: BLE001 - one sleeve's AI must never stall the tick
+                log.error("runner.ai_inference_start_failed", experiment_id=sleeve.experiment_id, exc_info=True)
 
     async def snapshot(self) -> None:
         now = self.clock.now()

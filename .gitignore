@@ -19,3 +19,8 @@ data/logs/
 *.egg-info/
 dist/
 build/
+data/daemon_status.json
+data/marketlab.pid
+data/openai_spend.json
+data/KILL_SWITCH
+data/replay/

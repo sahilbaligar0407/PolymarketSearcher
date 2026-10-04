@@ -499,3 +499,58 @@ def test_new_cohort_requires_dead_status(tmp_path) -> None:
     with pytest.raises(ValueError):
         registry.new_cohort(experiment.experiment_id)
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# AI stack wiring and decision audit
+# ---------------------------------------------------------------------------
+
+
+class ParamCapturingStrategy(Strategy):
+    """Does nothing; the test inspects the params it was constructed with."""
+
+    name = "param_capture"
+    version = "1.0.0"
+
+
+def _ai_variant(stack: str) -> VariantSpec:
+    return VariantSpec(
+        strategy_name="param_capture",
+        strategy_class_path="tests.unit.test_runner:ParamCapturingStrategy",
+        universe="uni_1",
+        params={"ai_stack": stack},
+        evidence_class="F",
+        trades=True,
+        requires_ai=True,
+    )
+
+
+async def test_ai_arms_get_their_tiers_and_unavailable_arms_are_never_registered(tmp_path) -> None:
+    from marketlab.ai.provider import DisabledProvider
+    from marketlab.ai.stack import AIStack, AssessmentCache, EvidenceCache
+
+    clock = SimulatedClock(T0)
+    local, openai = DisabledProvider(), DisabledProvider()
+    stack = AIStack({"local": local, "openai": openai}, EvidenceCache(lambda c: None), AssessmentCache(clock))
+    runner = _make_runner(tmp_path / "m.db", {}, clock, ai_stack=stack)
+    await runner.load_or_create_sleeves([_ai_variant("local"), _ai_variant("hybrid"), _ai_variant("jev")])
+
+    assert len(runner._sleeves) == 2
+    by_stack = {sl.strategy.params["ai_stack"]: sl.strategy.params for sl in runner._sleeves.values()}
+    assert set(by_stack) == {"local", "hybrid"}
+    assert by_stack["local"]["llm_provider"] is local and by_stack["local"]["escalation_provider"] is None
+    assert by_stack["hybrid"]["escalation_provider"] is openai
+    assert by_stack["hybrid"]["retrieval_store"] is stack.evidence
+    # Collaborators never leak into the hashed, persisted parameters.
+    stored = [runner.store.get_experiment(eid) for eid in runner._sleeves]
+    assert all("llm_provider" not in (e.parameters or {}) for e in stored)
+    assert {e.llm_model_id for e in stored} == {"disabled:none", "disabled:none+disabled:none"}
+
+
+async def test_filled_orders_persist_their_rationale(tmp_path) -> None:
+    clock = SimulatedClock(T0)
+    runner = _make_runner(tmp_path / "m.db", {"KXBTC-TEST": {"uni_1"}}, clock)
+    await runner.load_or_create_sleeves([_variant("greedy_loss", _GREEDY_LOSS_PATH)])
+    await runner.dispatch(_book_event("KXBTC-TEST", T0))
+    rows = runner.store._conn.execute("SELECT rationale, filled_quantity FROM decisions").fetchall()
+    assert [tuple(r) for r in rows] == [("test: buy nearly everything", 50)]

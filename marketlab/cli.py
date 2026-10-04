@@ -18,7 +18,7 @@ import signal
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -597,6 +597,37 @@ def ai_doctor() -> None:
     console.print(table)
 
 
+@ai_app.command("stack")
+def ai_stack_cmd() -> None:
+    """Show which AI tiers (local / Jev / OpenAI) are live and which arms will run."""
+    from marketlab.ai.stack import STACKS, build_ai_stack
+
+    settings = load_settings()
+
+    async def _probe() -> list[tuple[str, str, bool, str]]:
+        detected = await detect_provider(settings)
+        stack = await build_ai_stack(settings, detected, LiveClock(), lambda _cid: None)
+        rows = []
+        for tier in ("local", "jev", "openai"):
+            provider = stack.providers.get(tier)
+            if provider is None:
+                rows.append((tier, "-", False, "not configured"))
+                continue
+            health = await provider.probe()
+            rows.append((tier, provider.model, health.ok, health.detail))
+            await provider.close()
+        rows.append(("arms", ", ".join(stack.available_stacks()) or "none", True,
+                     "of " + ", ".join(STACKS)))
+        return rows
+
+    table = Table(title="AI Stack")
+    for col in ("Tier", "Model", "Status", "Detail"):
+        table.add_column(col)
+    for tier, model, ok, detail in _run(_probe()):
+        table.add_row(tier, model, "OK" if ok else "UNAVAILABLE", detail or "-")
+    console.print(table)
+
+
 @ai_app.command("assess")
 def ai_assess(market_id: str) -> None:
     settings = load_settings()
@@ -1047,14 +1078,80 @@ def live_start(
 
 
 # ---------------------------------------------------------------------------
+# kill switch / dashboard
+# ---------------------------------------------------------------------------
+
+
+@app.command("kill")
+def kill_cmd(
+    stop_daemon: bool = typer.Option(True, "--stop-daemon/--keep-running",
+                                     help="Also stop the daemon after engaging the switch."),
+    reason: str = typer.Option("manual emergency stop", "--reason"),
+) -> None:
+    """EMERGENCY STOP: engage the global kill switch (refuses all new risk) and stop the daemon."""
+    from marketlab.execution.risk_gateway import KILL_SWITCH_PATH
+
+    KILL_SWITCH_PATH.parent.mkdir(parents=True, exist_ok=True)
+    KILL_SWITCH_PATH.write_text(f"{datetime.now(UTC).isoformat()} {reason}\n", encoding="utf-8")
+    console.print(f"[bold red]KILL SWITCH ENGAGED[/bold red] ({KILL_SWITCH_PATH}). No new positions will open.")
+    if stop_daemon:
+        settings = load_settings()
+        pid = _read_pid_file(settings)
+        if pid is not None and _pid_alive(pid):
+            _signal_stop(pid)
+            console.print(f"Sent stop signal to daemon pid {pid}.")
+    console.print("Run `marketlab unkill` to clear it.")
+
+
+@app.command("unkill")
+def unkill_cmd() -> None:
+    """Clear the global kill switch."""
+    from marketlab.execution.risk_gateway import KILL_SWITCH_PATH
+
+    if KILL_SWITCH_PATH.exists():
+        KILL_SWITCH_PATH.unlink()
+        console.print("[green]kill switch cleared[/green]")
+    else:
+        console.print("kill switch was not engaged")
+
+
+@app.command("dashboard")
+def dashboard_cmd(
+    port: int = typer.Option(8765, "--port"),
+    open_browser: bool = typer.Option(False, "--open/--no-open"),
+) -> None:
+    """Serve the local read-only web dashboard (http://127.0.0.1:PORT)."""
+    from marketlab.dashboard.server import serve
+
+    settings = load_settings()
+    serve(settings, port=port, open_browser=open_browser)
+
+
+# ---------------------------------------------------------------------------
 # run -- the foreground daemon used by service scripts
 # ---------------------------------------------------------------------------
+
+
+def _keep_system_awake() -> None:
+    """Ask Windows not to idle-sleep while the daemon runs (released when it exits).
+
+    A sleeping laptop silently stops the tournament. This does not keep the display on
+    and cannot override closing the lid if the power plan says "sleep on lid close".
+    """
+    if os.name != "nt":
+        return
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        es_continuous, es_system_required = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(es_continuous | es_system_required)
 
 
 @app.command("run")
 def run_cmd() -> None:
     """Run the full daemon in the foreground. Used by service-manager scripts."""
     settings = load_settings()
+    _keep_system_awake()
     _write_pid_file(settings)
     try:
         _run(Supervisor(settings).run())

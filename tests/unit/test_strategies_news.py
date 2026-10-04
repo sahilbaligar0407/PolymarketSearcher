@@ -182,3 +182,117 @@ async def test_no_provider_configured_defaults_to_disabled_and_is_clean() -> Non
     strat = NewsProbabilityStrategy("s1", "e1", ctx, params={})
     await strat.evaluate_market(CANONICAL_ID)
     assert strat.generate_intents() == []
+
+
+# ---------------------------------------------------------------------------
+# AI stack: escalation, shared inference, code-owned identity fields
+# ---------------------------------------------------------------------------
+
+
+def _judgement(p_yes: str, confidence: str = "0.8") -> dict[str, Any]:
+    """What a real model is asked for: judgement only, no identity fields."""
+    payload = _valid_payload(p_yes, confidence)
+    for key in ("market_id", "as_of", "information_cutoff"):
+        payload.pop(key)
+    return payload
+
+
+async def test_code_stamps_identity_fields_the_model_omits() -> None:
+    provider = FakeProvider(payload=_judgement("0.75", "0.9"))
+    strat = NewsProbabilityStrategy("s1", "e1", _ctx(), params={"llm_provider": provider, "entry_edge": "0.05"})
+    await strat.evaluate_market(CANONICAL_ID)
+    assert len(strat.generate_intents()) == 1
+
+
+async def test_model_naming_a_different_market_still_fails() -> None:
+    payload = _judgement("0.75", "0.9") | {"market_id": "kalshi:some-other-market"}
+    strat = NewsProbabilityStrategy("s1", "e1", _ctx(), params={"llm_provider": FakeProvider(payload=payload)})
+    await strat.evaluate_market(CANONICAL_ID)
+    assert strat.generate_intents() == []
+
+
+async def test_escalation_confirms_and_trade_records_both_opinions() -> None:
+    primary = FakeProvider(payload=_judgement("0.75", "0.9"))
+    second = FakeProvider(payload=_judgement("0.70", "0.8"), name="openai", model="openai:gpt-4.1-nano")
+    strat = NewsProbabilityStrategy(
+        "s1", "e1", _ctx(),
+        params={"llm_provider": primary, "escalation_provider": second, "entry_edge": "0.05", "ai_stack": "hybrid"},
+    )
+    await strat.evaluate_market(CANONICAL_ID)
+    intents = strat.generate_intents()
+    assert len(intents) == 1
+    assert intents[0].features["second_opinion_model"] == "openai:gpt-4.1-nano"
+    assert intents[0].features["ai_stack"] == "hybrid"
+    assert "confirmed by" in intents[0].rationale
+    assert second.call_count == 1
+
+
+async def test_escalation_disagreement_blocks_trade() -> None:
+    primary = FakeProvider(payload=_judgement("0.75", "0.9"))
+    second = FakeProvider(payload=_judgement("0.20", "0.8"), name="openai")
+    strat = NewsProbabilityStrategy(
+        "s1", "e1", _ctx(), params={"llm_provider": primary, "escalation_provider": second, "entry_edge": "0.05"}
+    )
+    await strat.evaluate_market(CANONICAL_ID)
+    assert strat.generate_intents() == []
+    forecasts = strat.drain_forecasts()
+    assert any(f.abstain and "escalation_disagrees" in f.rationale for f in forecasts)
+
+
+async def test_escalation_out_of_budget_means_no_trade() -> None:
+    primary = FakeProvider(payload=_judgement("0.75", "0.9"))
+    strat = NewsProbabilityStrategy(
+        "s1", "e1", _ctx(),
+        params={"llm_provider": primary, "escalation_provider": FakeProvider(payload=None), "entry_edge": "0.05"},
+    )
+    await strat.evaluate_market(CANONICAL_ID)
+    assert strat.generate_intents() == []
+
+
+async def test_no_paid_second_opinion_unless_primary_would_trade() -> None:
+    primary = FakeProvider(payload=_judgement("0.42", "0.9"))  # no edge vs a 0.40/0.42 book
+    second = FakeProvider(payload=_judgement("0.90", "0.9"), name="openai")
+    strat = NewsProbabilityStrategy(
+        "s1", "e1", _ctx(), params={"llm_provider": primary, "escalation_provider": second}
+    )
+    await strat.evaluate_market(CANONICAL_ID)
+    assert second.call_count == 0
+
+
+async def test_min_evidence_gate_blocks_evidence_free_assessment() -> None:
+    provider = FakeProvider(payload=_judgement("0.75", "0.9"))
+    strat = NewsProbabilityStrategy(
+        "s1", "e1", _ctx(), params={"llm_provider": provider, "min_evidence_items": 1}
+    )
+    await strat.evaluate_market(CANONICAL_ID)
+    assert strat.generate_intents() == []
+
+
+async def test_variants_share_one_inference_through_the_cache() -> None:
+    from marketlab.ai.stack import AssessmentCache
+
+    ctx = _ctx()
+    cache = AssessmentCache(ctx.clock)
+    provider = FakeProvider(payload=_judgement("0.75", "0.9"))
+    strats = [
+        NewsProbabilityStrategy(f"s{i}", f"e{i}", ctx,
+                                params={"llm_provider": provider, "assessment_cache": cache, "entry_edge": edge})
+        for i, edge in enumerate(("0.05", "0.10", "0.20"))
+    ]
+    for strat in strats:
+        await strat.evaluate_market(CANONICAL_ID)
+    assert provider.call_count == 1
+    assert [len(s.generate_intents()) for s in strats] == [1, 1, 1]
+
+
+async def test_background_inference_drains_the_queue_off_the_dispatch_path() -> None:
+    import asyncio
+
+    provider = FakeProvider(payload=_judgement("0.75", "0.9"))
+    strat = NewsProbabilityStrategy("s1", "e1", _ctx(), params={"llm_provider": provider})
+    strat._pending_inferences.add(CANONICAL_ID)
+    assert strat.start_background_inference()
+    assert not strat.start_background_inference()  # one drain in flight at a time
+    await asyncio.sleep(0.05)
+    assert provider.call_count == 1
+    assert len(strat.generate_intents()) == 1

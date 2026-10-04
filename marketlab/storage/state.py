@@ -1127,6 +1127,37 @@ class StateStore:
                 ),
             )
 
+    def save_decision(self, intent: Any, order: Order, experiment_id: str) -> None:
+        """Persist the why behind a filled order (see migrations/002_decisions.sql)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO decisions (
+                    intent_id, order_id, experiment_id, strategy_id, canonical_id, side,
+                    action, quantity, filled_quantity, average_fill_price, fees_paid,
+                    model_probability, expected_edge, rationale, features_json, decided_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    intent.intent_id,
+                    order.order_id,
+                    experiment_id,
+                    intent.strategy_id,
+                    intent.canonical_id,
+                    str(intent.side),
+                    str(intent.action),
+                    intent.quantity,
+                    order.filled_quantity,
+                    _decs(order.average_fill_price),
+                    str(order.fees_paid),
+                    _decs(intent.model_probability),
+                    _decs(intent.expected_edge),
+                    intent.rationale,
+                    json.dumps(intent.features or {}, default=str),
+                    _dts(intent.decision_time),
+                ),
+            )
+
     def save_forecasts_bulk(self, forecasts: Sequence[ProbabilityForecast]) -> int:
         """Insert many forecasts in ONE transaction.
 

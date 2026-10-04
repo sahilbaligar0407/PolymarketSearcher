@@ -51,6 +51,13 @@ ingest:
 
 ai:
   enabled: true
+  # The model the tournament's AI sleeves actually run (the autodetected model is only
+  # used by `marketlab ai doctor/assess`). Measured 2026-10-03 on this laptop (CPU only,
+  # AMD 860M iGPU): qwen2.5:3b-instruct ~10 s per structured assessment warm, while
+  # qwen2.5vl:7b took ~55 s and simply echoed the market price back.
+  runtime_model: qwen2.5:3b-instruct
+  # One at a time: CPU inference with two in flight just doubles each call's latency.
+  runtime_concurrency: 1
   # Event-triggered inference; the daemon stays alive but does not burn compute per tick.
   triggers:
     - high_impact_news
