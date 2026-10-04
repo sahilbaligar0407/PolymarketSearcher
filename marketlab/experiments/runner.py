@@ -50,7 +50,7 @@ from marketlab.core.events import (
 from marketlab.core.instruments import ONE, NormalizedMarket, OrderBook, Side
 from marketlab.core.orders import OrderStatus, RejectReason
 from marketlab.core.portfolio import Portfolio, SleeveStatus
-from marketlab.core.strategy import Strategy, StrategyContext
+from marketlab.core.strategy import Strategy, StrategyContext, UniverseContext
 from marketlab.experiments import identity as identity_mod
 from marketlab.experiments.identity import ExperimentIdentity
 from marketlab.experiments.registry import ExperimentRegistry
@@ -248,6 +248,8 @@ class ExperimentRunner:
         #: canonical_id -> YES-probability mid, for StrategyContext and mark-to-market.
         self._marks: dict[str, Decimal] = {}
         self._ctx = StrategyContext(clock=clock, books=self._books, markets=self._markets, marks=self._marks)
+        #: universe -> {canonical_id: market}; each sleeve's UniverseContext reads its own.
+        self._universe_members: dict[str, dict[str, NormalizedMarket]] = {}
 
         self._bankroll_per_variant = Decimal(
             str((settings.strategies.get("meta", {}) or {}).get("bankroll_per_variant", "50.00"))
@@ -361,7 +363,7 @@ class ExperimentRunner:
                 strategy = strategy_cls(
                     strategy_id=strategy_id,
                     experiment_id=experiment.experiment_id,
-                    ctx=self._ctx,
+                    ctx=UniverseContext(self._ctx, self._universe_members.setdefault(variant.universe, {})),
                     # Live collaborators ride alongside the declared params but never
                     # enter variant.params, which is hashed into the experiment identity.
                     params={**variant.params, **ai_params},
@@ -535,6 +537,11 @@ class ExperimentRunner:
     def _update_caches(self, event: BaseEvent) -> None:
         if isinstance(event, MarketUpdateEvent):
             self._markets[event.market.canonical_id] = event.market
+            try:
+                for universe in self._universes_for(event.market.canonical_id) or ():
+                    self._universe_members.setdefault(universe, {})[event.market.canonical_id] = event.market
+            except Exception:  # noqa: BLE001 - routing failure must not lose the market update
+                log.error("runner.universe_membership_failed", canonical_id=event.market.canonical_id, exc_info=True)
         elif isinstance(event, BookUpdateEvent):
             self._books[event.book.canonical_id] = event.book
             if event.book.mid is not None:

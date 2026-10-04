@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from marketlab.clock import SimulatedClock
-from marketlab.core.events import TimerEvent
+from marketlab.core.events import MarketUpdateEvent, TimerEvent
 from marketlab.core.instruments import (
     BookLevel,
     Category,
@@ -58,6 +58,13 @@ def _ctx(markets: list[NormalizedMarket], books: dict[str, OrderBook]) -> Strate
     )
 
 
+def _routed(strat: BinaryParityStrategy) -> BinaryParityStrategy:
+    """Deliver the market updates the runner routes to a sleeve's universe."""
+    for m in strat.ctx.markets():
+        strat.on_market_update(MarketUpdateEvent(event_time=TS, first_seen_time=TS, market=m))
+    return strat
+
+
 def _complementary_markets(fees: Fees | None = None) -> tuple[NormalizedMarket, NormalizedMarket]:
     a = _market("kalshi:chiefs-win", "Will the Chiefs win their game?", fees)
     b = _market("kalshi:chiefs-lose", "Will the Chiefs lose their game?", fees)
@@ -74,7 +81,7 @@ def test_touch_looks_profitable_but_no_size_behind_it_is_rejected() -> None:
         b.canonical_id: _book(b.canonical_id, [("0.30", 1)]),
     }
     ctx = _ctx([a, b], books)
-    strat = BinaryParityStrategy("s1", "e1", ctx, params={"quantity": 5, "min_edge": "0.01"})
+    strat = _routed(BinaryParityStrategy("s1", "e1", ctx, params={"quantity": 5, "min_edge": "0.01"}))
     strat.on_timer(TimerEvent(event_time=TS, first_seen_time=TS))
 
     assert strat.generate_intents() == []
@@ -88,7 +95,7 @@ def test_genuinely_executable_pair_passes() -> None:
         b.canonical_id: _book(b.canonical_id, [("0.45", 20)]),
     }
     ctx = _ctx([a, b], books)
-    strat = BinaryParityStrategy("s1", "e1", ctx, params={"quantity": 5, "min_edge": "0.01"})
+    strat = _routed(BinaryParityStrategy("s1", "e1", ctx, params={"quantity": 5, "min_edge": "0.01"}))
     strat.on_timer(TimerEvent(event_time=TS, first_seen_time=TS))
 
     intents = strat.generate_intents()
@@ -113,7 +120,7 @@ def test_fees_flip_a_marginal_case_from_accept_to_reject() -> None:
     params = {"quantity": 5, "min_edge": "0.01", "slippage_buffer": "0.0"}
 
     ctx_no_fees = _ctx([a, b], books)
-    strat_no_fees = BinaryParityStrategy("s1", "e1", ctx_no_fees, params=params)
+    strat_no_fees = _routed(BinaryParityStrategy("s1", "e1", ctx_no_fees, params=params))
     strat_no_fees.on_timer(TimerEvent(event_time=TS, first_seen_time=TS))
     assert len(strat_no_fees.generate_intents()) == 2
 
@@ -122,7 +129,19 @@ def test_fees_flip_a_marginal_case_from_accept_to_reject() -> None:
         b_fee.canonical_id: _book(b_fee.canonical_id, ask_levels),
     }
     ctx_with_fees = _ctx([a_fee, b_fee], books_with_fee_markets)
-    strat_with_fees = BinaryParityStrategy("s2", "e1", ctx_with_fees, params=params)
+    strat_with_fees = _routed(BinaryParityStrategy("s2", "e1", ctx_with_fees, params=params))
     strat_with_fees.on_timer(TimerEvent(event_time=TS, first_seen_time=TS))
     assert strat_with_fees.generate_intents() == []
     assert strat_with_fees.rejection_counts.get("edge_below_min", 0) >= 1
+
+
+def test_pairs_only_within_one_kalshi_event_and_never_poly() -> None:
+    a, b = _complementary_markets()
+    other = _market("kalshi:other-lose", "Will the Chiefs lose their game?").model_copy(update={"event_id": "game-2"})
+    poly = _market("poly:x", "Will the Chiefs lose their game?").model_copy(update={"venue": Venue.POLY_GLOBAL})
+    ctx = _ctx([a, b, other, poly], {})
+    strat = _routed(BinaryParityStrategy("s1", "e1", ctx, params={}))
+    strat._refresh_pairs()
+    assert [(x.canonical_id, y.canonical_id) for x, y in strat._pairs] in (
+        [("kalshi:chiefs-win", "kalshi:chiefs-lose")], [("kalshi:chiefs-lose", "kalshi:chiefs-win")],
+    )

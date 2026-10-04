@@ -37,11 +37,12 @@ without the other.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from marketlab.core.events import BookUpdateEvent, TimerEvent
-from marketlab.core.instruments import ONE, BookLevel, NormalizedMarket, Side
+from marketlab.core.events import BookUpdateEvent, MarketUpdateEvent, TimerEvent
+from marketlab.core.instruments import ONE, BookLevel, NormalizedMarket, Side, Venue
 from marketlab.core.orders import Action, OrderType
 from marketlab.matching import detect_complement, extract_claim
 from marketlab.strategies.base import BaseStrategy
@@ -79,19 +80,42 @@ def _walk_avg_price(levels: tuple[BookLevel, ...], quantity: int) -> tuple[Decim
     return cost / filled, filled
 
 
+#: Events with more contracts than this are multi-outcome ladders (strike grids, ranges),
+#: where pairwise complements do not exist; skipping them bounds the per-event work.
+_MAX_EVENT_GROUP = 40
+
+#: canonical_id -> (title, claim). Claims depend only on the market's own text, so every
+#: sleeve shares one extraction per market.
+_CLAIM_CACHE: dict[str, tuple[str, Any]] = {}
+
+
+def _claim(market: NormalizedMarket) -> Any:
+    cached = _CLAIM_CACHE.get(market.canonical_id)
+    if cached is not None and cached[0] == market.title:
+        return cached[1]
+    claim = extract_claim(market)
+    if len(_CLAIM_CACHE) > 50_000:
+        _CLAIM_CACHE.clear()
+    _CLAIM_CACHE[market.canonical_id] = (market.title, claim)
+    return claim
+
+
 class BinaryParityStrategy(BaseStrategy):
     """Buys both legs of a complementary Kalshi pair when the combined cost is executably
     cheap enough to guarantee a profit after every real cost.
     """
 
     name = "binary_parity"
-    version = "1.0.0"
+    version = "1.1.0"
     evidence_class = "B"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
         super().__init__(strategy_id, experiment_id, ctx, params)
         self._pairs: list[tuple[NormalizedMarket, NormalizedMarket]] = []
         self._pairs_fingerprint: int = -1
+        self._pairs_built_at: datetime | None = None
+        #: Kalshi markets routed to this sleeve's universe (see _refresh_pairs).
+        self._universe_ids: set[str] = set()
         #: reason -> count, for reporting *why* a fat-looking pair never traded.
         self.rejection_counts: dict[str, int] = {}
 
@@ -103,7 +127,11 @@ class BinaryParityStrategy(BaseStrategy):
         for a, b in self._pairs:
             self._evaluate_pair(a, b)
 
+    def on_market_update(self, event: MarketUpdateEvent) -> None:
+        self._universe_ids.add(event.market.canonical_id)
+
     def on_book_update(self, event: BookUpdateEvent) -> None:
+        self._universe_ids.add(event.canonical_id)
         self._refresh_pairs()
         cid = event.canonical_id
         for a, b in self._pairs:
@@ -113,22 +141,38 @@ class BinaryParityStrategy(BaseStrategy):
     # ------------------------------------------------------------------ pair discovery
 
     def _refresh_pairs(self) -> None:
-        markets = self.ctx.markets()
-        # Cheap fingerprint: the market list only ever grows/shrinks at universe-refresh
-        # cadence, so a length check is enough to avoid rebuilding claims every tick while
-        # still catching new markets appearing in-run.
-        fingerprint = len(markets)
+        """Rebuild the complement pairs for this sleeve's own markets.
+
+        This used to run extract_claim over *every* market in the shared context (Kalshi
+        and Polymarket alike) and compare all n^2 pairs whenever the market count changed
+        - which, with markets streaming in, was most ticks, in each of a dozen sleeves,
+        on the event loop. Profiled live: it blocked the daemon for up to ten minutes at a
+        time, starving every feed until the supervisor halted trading. Now: only Kalshi
+        markets routed to this sleeve's universe, paired only within one Kalshi event
+        (complements always share an event), claims cached process-wide, and at most one
+        rebuild a minute.
+        """
+        now = self.now()
+        if self._pairs_built_at is not None and (now - self._pairs_built_at).total_seconds() < 60:
+            return
+        fingerprint = len(self._universe_ids)
         if fingerprint == self._pairs_fingerprint:
             return
         self._pairs_fingerprint = fingerprint
-        claims = {m.canonical_id: extract_claim(m) for m in markets}
+        self._pairs_built_at = now
+        by_event: dict[str, list[NormalizedMarket]] = {}
+        for cid in self._universe_ids:
+            m = self.ctx.market(cid)
+            if m is not None and m.venue is Venue.KALSHI:
+                by_event.setdefault(m.event_id or cid, []).append(m)
         pairs: list[tuple[NormalizedMarket, NormalizedMarket]] = []
-        for i, a in enumerate(markets):
-            for b in markets[i + 1 :]:
-                if a.category != b.category:
-                    continue
-                if detect_complement(claims[a.canonical_id], claims[b.canonical_id]):
-                    pairs.append((a, b))
+        for group in by_event.values():
+            if len(group) < 2 or len(group) > _MAX_EVENT_GROUP:
+                continue
+            for i, a in enumerate(group):
+                for b in group[i + 1 :]:
+                    if detect_complement(_claim(a), _claim(b)):
+                        pairs.append((a, b))
         self._pairs = pairs
 
     # ------------------------------------------------------------------ evaluation

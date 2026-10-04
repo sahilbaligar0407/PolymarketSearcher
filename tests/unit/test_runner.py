@@ -554,3 +554,19 @@ async def test_filled_orders_persist_their_rationale(tmp_path) -> None:
     await runner.dispatch(_book_event("KXBTC-TEST", T0))
     rows = runner.store._conn.execute("SELECT rationale, filled_quantity FROM decisions").fetchall()
     assert [tuple(r) for r in rows] == [("test: buy nearly everything", 50)]
+
+
+async def test_sleeve_context_lists_only_its_universe(tmp_path) -> None:
+    from marketlab.core.events import MarketUpdateEvent
+    from marketlab.core.instruments import MarketStatus, NormalizedMarket
+
+    clock = SimulatedClock(T0)
+    runner = _make_runner(tmp_path / "m.db", {"kalshi:in": {"uni_1"}, "kalshi:out": {"uni_2"}}, clock)
+    await runner.load_or_create_sleeves([_variant("recording", _RECORDING_PATH)])
+    for cid in ("kalshi:in", "kalshi:out", "poly:x"):
+        market = NormalizedMarket(canonical_id=cid, venue=Venue.KALSHI, venue_market_id=cid, event_id="e",
+                                  title=cid, status=MarketStatus.OPEN)
+        await runner.dispatch(MarketUpdateEvent(event_time=T0, first_seen_time=T0, market=market))
+    sleeve = next(iter(runner._sleeves.values()))
+    assert [m.canonical_id for m in sleeve.strategy.ctx.markets()] == ["kalshi:in"]
+    assert sleeve.strategy.ctx.market("kalshi:out") is not None  # lookups stay global

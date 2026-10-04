@@ -105,6 +105,26 @@ class StrategyContext:
         return book.mid if book else None
 
 
+class UniverseContext(StrategyContext):
+    """A sleeve's context: lookups by id stay global, but ``markets()`` is its universe.
+
+    Strategies iterate ``markets()`` on every timer tick. Over the shared context that is
+    every market the engine knows - Kalshi and Polymarket, thousands of them - for every
+    sleeve, every second; it also let universe-agnostic loops (the random control, for
+    one) trade markets outside the sleeve's declared universe. ``members`` is maintained
+    by the runner as markets arrive.
+    """
+
+    __slots__ = ("_members",)
+
+    def __init__(self, base: StrategyContext, members: dict[str, NormalizedMarket]) -> None:
+        super().__init__(base.clock, base._books, base._markets, base._marks, base.params)
+        self._members = members
+
+    def markets(self) -> list[NormalizedMarket]:
+        return list(self._members.values())
+
+
 class Strategy(abc.ABC):  # noqa: B024 - see the handler note below
     """Base class for every strategy variant.
 
