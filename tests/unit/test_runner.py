@@ -570,3 +570,20 @@ async def test_sleeve_context_lists_only_its_universe(tmp_path) -> None:
     sleeve = next(iter(runner._sleeves.values()))
     assert [m.canonical_id for m in sleeve.strategy.ctx.markets()] == ["kalshi:in"]
     assert sleeve.strategy.ctx.market("kalshi:out") is not None  # lookups stay global
+
+
+def test_series_membership_is_an_exact_token_not_a_prefix() -> None:
+    from marketlab.core.instruments import MarketStatus, NormalizedMarket
+    from marketlab.daemon.registry import MarketRegistry
+
+    universes = {"universes": {
+        "btc_1h": {"kalshi_series": ["KXBTCD", "KXBTC"]},
+        "btc_15m": {"kalshi_series": ["KXBTC15M"], "available": False},
+    }}
+    reg = MarketRegistry(max_tracked=10, universes_cfg=universes)
+    for ticker in ("KXBTC15M-26OCT041815-15", "KXBTC-26OCT0417-B90250", "KXBTCD-26OCT0417-T89999.99"):
+        reg.upsert(NormalizedMarket(canonical_id=f"kalshi:{ticker.lower()}", venue=Venue.KALSHI,
+                                    venue_market_id=ticker, event_id="e", title=ticker, status=MarketStatus.OPEN))
+    assert reg.universes_for("kalshi:kxbtc15m-26oct041815-15") == []  # disabled, and not "KXBTC"
+    assert reg.universes_for("kalshi:kxbtc-26oct0417-b90250") == ["btc_1h"]
+    assert reg.universes_for("kalshi:kxbtcd-26oct0417-t89999.99") == ["btc_1h"]

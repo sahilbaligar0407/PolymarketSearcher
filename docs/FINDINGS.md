@@ -339,3 +339,14 @@ highs, lows and hourly values and it kept whichever arrived last, for any date. 
 have bet heavily against a near-certain YES. It now uses daytime highs only, matched to
 each contract's own date: same contract, p = 0.84 at sigma 3 F. Every dead path brought
 back to life this session hid at least one more bug behind the first.
+
+**48. "Disabled" 15-minute BTC was still trading, as hourly BTC.** btc_15m was switched
+off on 2026-09-08 on evidence (a 50.7% coin flip over 977 trades, net of fees). But
+universe membership matched series by *prefix*, and btc_1h declares the series `KXBTC`
+(hourly ranges) - so every `KXBTC15M` market was a btc_1h member. The hourly sleeves kept
+trading the 15-minute contracts, the tracked set spent 87 of its 400 slots on them, and
+real hourly strikes (`KXBTCD`) were crowded down to 10-18 books. `KXETH` likewise claimed
+`KXETH15M`. A series is now matched as an exact token (the ticker up to its first `-`),
+and the tracked set reserves slots for quota universes, since ranking by open interest
+always favours season-long sports markets over contracts that settle within hours. One
+unit test had only passed *because of* the prefix bug.

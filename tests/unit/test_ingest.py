@@ -223,7 +223,9 @@ async def test_run_once_reports_success_when_markets_present(monkeypatch) -> Non
 
     class _OneMarketKalshiRest(_FakeKalshiRest):
         async def iter_all_markets(self, *args, **kwargs):  # noqa: ANN002, ANN003
-            yield {"markets": [_raw("KXBTC15M-1")]}
+            # A series the real configs/universes.yaml tracks (KXBTC15M is disabled there;
+            # this test only passed while "KXBTC" prefix-matched it).
+            yield {"markets": [_raw("KXBTCD-1")]}
 
     settings = load_settings()
     clock = SimulatedClock(START)

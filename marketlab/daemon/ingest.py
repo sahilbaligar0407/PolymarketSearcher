@@ -75,6 +75,7 @@ from marketlab.core.instruments import (
     OrderBook,
     Venue,
 )
+from marketlab.daemon.registry import series_token
 from marketlab.logging import get_logger
 from marketlab.settings import CONFIG_DIR, Settings
 from marketlab.storage.state import LeaderboardRow as StoreLeaderboardRow
@@ -214,6 +215,8 @@ def select_tracked_markets(
     markets: Iterable[NormalizedMarket],
     universes_cfg: Mapping[str, Any] | None,
     max_tracked_markets: int,
+    quotas: Mapping[str, int] | None = None,
+    now: datetime | None = None,
 ) -> list[NormalizedMarket]:
     """Kalshi's ~14k-series catalogue -> the subset a paper-trading run should track.
 
@@ -248,7 +251,7 @@ def select_tracked_markets(
         if m.liquidity < min_liquidity:
             continue
         if has_allowlist:
-            in_series = any(series.startswith(s) for s in allowed_series)
+            in_series = series_token(m) in allowed_series
             if not in_series and m.category not in allowed_categories:
                 continue
         selected.append(m)
@@ -258,9 +261,33 @@ def select_tracked_markets(
         return (-(m.volume + m.open_interest), close)
 
     selected.sort(key=_sort_key)
-    if max_tracked_markets and max_tracked_markets > 0:
-        selected = selected[:max_tracked_markets]
-    return selected
+    if not (max_tracked_markets and max_tracked_markets > 0):
+        return selected
+
+    # Per-universe quotas first. Ranking everything by volume + open interest hands the
+    # whole tracked set to season-long markets (NFL wins, spreads) with enormous open
+    # interest, and squeezes out short-lived contracts such as hourly BTC strikes, which
+    # can never build that much interest before they settle. A quota universe gets its
+    # most active markets that settle within a day.
+    reserved: list[NormalizedMarket] = []
+    if quotas:
+        universes = cfg.get("universes") or {}
+        horizon = (now or datetime.now(UTC)) + timedelta(days=1)
+        for name, quota in quotas.items():
+            series = tuple(str(x).upper() for x in ((universes.get(name) or {}).get("kalshi_series") or []))
+            if not series:
+                continue
+            current = now or datetime.now(UTC)
+            members = [
+                m for m in selected
+                if series_token(m) in series
+                and m.close_time is not None and current < m.close_time <= horizon
+            ]
+            reserved.extend(members[: int(quota)])
+    chosen = list({m.canonical_id: m for m in reserved}.values())
+    seen = {m.canonical_id for m in chosen}
+    chosen.extend(m for m in selected if m.canonical_id not in seen)
+    return chosen[:max_tracked_markets]
 
 
 # ---------------------------------------------------------------------------
@@ -824,7 +851,10 @@ class IngestService:
                     await asyncio.sleep(0)
             normalized = list(normalized_by_id.values())
 
-            selected = select_tracked_markets(normalized, self.settings.universes, self._max_tracked)
+            selected = select_tracked_markets(
+                normalized, self.settings.universes, self._max_tracked,
+                quotas=self._cfg.get("book_quota_per_universe"), now=self.clock.now(),
+            )
             now = self.clock.now()
             rows_out: list[dict[str, Any]] = []
             for m in selected:

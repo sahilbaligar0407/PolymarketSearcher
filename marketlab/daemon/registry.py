@@ -68,14 +68,24 @@ _CATEGORY_LABEL_MAP: dict[str, Category] = {
 }
 
 
+def series_token(market: NormalizedMarket) -> str:
+    """A Kalshi market's series: the ticker up to its first ``-`` (KXBTC15M-26OCT04... ->
+    KXBTC15M).
+
+    Universe membership used to test ``startswith``, so the series ``KXBTC`` (hourly BTC
+    ranges) also claimed every ``KXBTC15M`` market - the 15-minute horizon that had been
+    disabled on evidence - and ``KXETH`` claimed ``KXETH15M``. A series is a whole token.
+    """
+    raw = (market.subcategory or market.venue_market_id or "").upper()
+    return raw.split("-", 1)[0]
+
+
 def _market_matches_universe(market: NormalizedMarket, udef: Mapping[str, Any]) -> bool:
     if udef.get("available") is False:
         return False
-    ticker = market.venue_market_id.upper()
-    series = (market.subcategory or ticker).upper()
+    token = series_token(market)
     for s in udef.get("kalshi_series") or ():
-        s_upper = str(s).upper()
-        if series.startswith(s_upper) or ticker.startswith(s_upper):
+        if token == str(s).upper():
             return True
     for label in udef.get("kalshi_series_categories") or ():
         cat = _CATEGORY_LABEL_MAP.get(str(label).strip().lower())
