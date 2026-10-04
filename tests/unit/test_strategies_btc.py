@@ -58,11 +58,11 @@ def test_is_below_threshold_contract() -> None:
     assert is_below_threshold_contract("Will BTC be above $50,000 at close?") is False
 
 
-def _market(title: str, close_time: datetime) -> NormalizedMarket:
+def _market(title: str, close_time: datetime, ticker: str = "KXBTCD-26SEP0413-T90000.00") -> NormalizedMarket:
     return NormalizedMarket(
         canonical_id="kalshi:btc-test",
         venue=Venue.KALSHI,
-        venue_market_id="KXBTCD-26SEP0413-T90000.00",
+        venue_market_id=ticker,
         event_id="btc-evt-1",
         title=title,
         category=Category.CRYPTO,
@@ -104,7 +104,8 @@ def _feed_spot_history(strat: BtcEventStrategy, spot: float, n: int = 20, step_s
 
 def test_ambiguous_wording_abstains() -> None:
     close_time = TS + timedelta(hours=1)
-    market = _market("Will BTC do something with $90,000?", close_time)
+    # A series whose structure does not settle the question, so wording must.
+    market = _market("Will BTC do something with $90,000?", close_time, ticker="KXBTCX-26SEP0413-T90000.00")
     book = _book()
     ctx = _ctx(market, book)
     strat = BtcEventStrategy("s1", "e1", ctx, params={"model": "gbm_terminal"})
@@ -143,7 +144,7 @@ def test_hand_computed_gbm_probability_matches_forecast() -> None:
 
 def test_terminal_variant_does_not_trade_barrier_worded_market() -> None:
     close_time = TS + timedelta(hours=1)
-    market = _market("Will BTC touch $90,000 before close?", close_time)
+    market = _market("Will BTC touch $90,000 before close?", close_time, ticker="KXBTCX-26SEP0413-T90000.00")
     book = _book()
     ctx = _ctx(market, book)
     strat = BtcEventStrategy("s1", "e1", ctx, params={"model": "gbm_terminal"})
@@ -153,6 +154,19 @@ def test_terminal_variant_does_not_trade_barrier_worded_market() -> None:
     # Out of scope for this variant (barrier wording, terminal model) - not ambiguous,
     # so no abstain forecast either, just silence.
     assert strat.drain_forecasts() == []
+    assert strat.generate_intents() == []
+
+
+def test_wording_contradicting_series_structure_abstains_and_never_trades() -> None:
+    close_time = TS + timedelta(hours=1)
+    # A terminal series (KXBTCD) whose own title says "touch ... before": never guess.
+    market = _market("Will BTC touch $90,000 before close?", close_time)
+    book = _book()
+    strat = BtcEventStrategy("s1", "e1", _ctx(market, book), params={"model": "gbm_terminal"})
+    _feed_spot_history(strat, 90000.0)
+    strat.on_book_update(BookUpdateEvent(book=book, event_time=TS, first_seen_time=TS))
+    forecasts = strat.drain_forecasts()
+    assert len(forecasts) == 1 and forecasts[0].abstain
     assert strat.generate_intents() == []
 
 

@@ -88,17 +88,21 @@ _BARRIER_SERIES = ("KXBTCMAX", "KXBTCMIN")
 
 def classify_measurement(title: str, description: str = "", ticker: str = "") -> str | None:
     """``'terminal'`` | ``'barrier_touch'`` | ``None`` (ambiguous -> caller must abstain)."""
-    upper = (ticker or "").upper()
-    if _TERMINAL_TICKER_RE.match(upper):
-        return "terminal"
-    if upper.startswith(_BARRIER_SERIES):
-        return "barrier_touch"
     lowered = f"{title}\n{description}".lower()
+    worded: str | None = None
     if any(k in lowered for k in _BARRIER_KEYWORDS):
-        return "barrier_touch"
-    if any(k in lowered for k in _TERMINAL_KEYWORDS):
-        return "terminal"
-    return None
+        worded = "barrier_touch"
+    elif any(k in lowered for k in _TERMINAL_KEYWORDS):
+        worded = "terminal"
+    upper = (ticker or "").upper()
+    structural: str | None = None
+    if _TERMINAL_TICKER_RE.match(upper):
+        structural = "terminal"
+    elif upper.startswith(_BARRIER_SERIES):
+        structural = "barrier_touch"
+    if structural is not None and worded is not None and structural != worded:
+        return None  # the contract's own words contradict its series: never guess
+    return structural or worded
 
 
 def is_below_threshold_contract(title: str) -> bool:
