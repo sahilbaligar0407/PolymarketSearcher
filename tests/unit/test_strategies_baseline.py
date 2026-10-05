@@ -159,7 +159,8 @@ def _drive_mean_reversion(h: StrategyHarness) -> None:
     for b, a in seq:
         h.feed_book(make_book("M1", [(b, 100)], [(a, 100)], h.now()))
         h.advance(5)
-    h.feed_book(make_book("M1", [("0.60", 100)], [("0.62", 100)], h.now()))
+    # A big enough spike that reverting half of it clears fees (a +0.11 jump nets -0.1c).
+    h.feed_book(make_book("M1", [("0.70", 100)], [("0.72", 100)], h.now()))
 
 
 def _drive_market_maker(h: StrategyHarness) -> None:

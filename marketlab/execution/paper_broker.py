@@ -215,20 +215,69 @@ class PaperBroker(Broker):
 
     # -- risk-gateway context (documented single-portfolio approximations) --------
 
-    def _category_exposures(
-        self, portfolio: Portfolio, market: NormalizedMarket
-    ) -> dict[Category, Decimal]:
-        # PaperBroker only ever holds one Portfolio at a time (via portfolio_provider);
-        # true cross-strategy category aggregation belongs to a portfolio-level service
-        # we don't own. This is a documented single-portfolio approximation.
-        return {market.category: portfolio.exposure()}
+    def _committed(self, portfolio: Portfolio) -> list[tuple[str, Decimal]]:
+        """(canonical_id, $ at risk) for every open position and resting BUY order.
 
-    def _cluster_exposures(
+        The exposure caps must see both. They used to see only filled positions, and
+        were handed the whole portfolio's exposure as "this category" and "this event",
+        so the category and cluster caps could never fire and a sleeve could rest $98 of
+        orders against a $20 cap (FINDINGS 58).
+        """
+        out = [(p.canonical_id, p.cost_basis) for p in portfolio.positions.values() if p.quantity > 0]
+        for oid, state in self._resting.items():
+            order = self._orders.get(oid)
+            if (
+                order is None or order.experiment_id != portfolio.experiment_id
+                or order.action is not Action.BUY or state.remaining_quantity <= 0
+            ):
+                continue
+            out.append((order.canonical_id, state.limit_price * Decimal(state.remaining_quantity)))
+        return out
+
+    def _open_order_exposure(self, portfolio: Portfolio) -> Decimal:
+        total = ZERO
+        for oid, state in self._resting.items():
+            order = self._orders.get(oid)
+            if order is not None and order.experiment_id == portfolio.experiment_id and order.action is Action.BUY:
+                total += state.limit_price * Decimal(max(state.remaining_quantity, 0))
+        return total
+
+    def _risk_context(
         self, portfolio: Portfolio, market: NormalizedMarket
-    ) -> dict[str, Decimal]:
-        # No explicit "cluster id" exists on NormalizedMarket; event_id is the most
-        # obviously-correlated grouping available without an external correlation graph.
-        return {market.event_id: portfolio.exposure()}
+    ) -> tuple[dict[Category, Decimal], dict[str, Decimal], Decimal, Decimal]:
+        """Category, cluster and event exposure plus resting-order total, in one pass."""
+        from marketlab.execution.risk_gateway import cluster_key
+
+        categories: dict[Category, Decimal] = {}
+        clusters: dict[str, Decimal] = {}
+        event = market.event_id or market.canonical_id
+        event_total = ZERO
+        for cid, amount in self._committed(portfolio):
+            m = self.market_provider(cid)
+            if m is None:
+                continue
+            categories[m.category] = categories.get(m.category, ZERO) + amount
+            ck = cluster_key(m)
+            clusters[ck] = clusters.get(ck, ZERO) + amount
+            if (m.event_id or m.canonical_id) == event:
+                event_total += amount
+        return categories, clusters, event_total, self._open_order_exposure(portfolio)
+
+    def _marks(self, portfolio: Portfolio) -> dict[str, Decimal]:
+        """Mark-to-market for the sleeve's open positions from the latest books (YES at
+        the mid, NO at 1 - mid). Without marks equity was cash + cost, so drawdown and
+        daily-loss pauses only ever saw realized losses."""
+        marks: dict[str, Decimal] = {}
+        for k, pos in portfolio.positions.items():
+            if pos.quantity <= 0:
+                continue
+            history = self._book_history.get(pos.canonical_id)
+            book = history[-1] if history else None
+            mid = book.mid if book is not None else None
+            if mid is None:
+                continue
+            marks[k] = mid if pos.side is Side.YES else ONE - mid
+        return marks
 
     def _daily_pnl(self, portfolio: Portfolio) -> Decimal:
         """P&L accrued since the start of the current UTC day, for this sleeve.
@@ -244,7 +293,7 @@ class PaperBroker(Broker):
         is broken. That only works if it resets.
         """
         today = self.clock.now().date()
-        pnl_now = portfolio.realized_pnl + portfolio.unrealized_pnl()
+        pnl_now = portfolio.realized_pnl + portfolio.unrealized_pnl(self._marks(portfolio))
         baseline_day, baseline_pnl = self._daily_baseline.get(
             portfolio.experiment_id, (None, None)
         )
@@ -423,14 +472,18 @@ class PaperBroker(Broker):
         portfolio = self.portfolio_provider(intent.experiment_id)
 
         # 6. Risk gate.
+        categories, clusters, event_total, open_total = self._risk_context(portfolio, market)
         decision = self.risk_gateway.evaluate(
             intent,
             portfolio,
             market,
             book,
-            self._category_exposures(portfolio, market),
-            self._cluster_exposures(portfolio, market),
+            categories,
+            clusters,
             self._daily_pnl(portfolio),
+            marks=self._marks(portfolio),
+            open_order_exposure=open_total,
+            event_exposure=event_total,
         )
         if not decision.approved:
             self.risk_gate_skips += 1
@@ -744,6 +797,16 @@ class PaperBroker(Broker):
             state = self._resting.get(oid)
             if state is None or state.remaining_quantity <= 0:
                 continue
+            # A print can only fill an order that existed when it happened, and only once.
+            # REST polling re-delivered the same 20 prints every pass (~4.5x each) and 28%
+            # of maker fills came from prints stamped before the order arrived (FINDINGS 58).
+            if trade.timestamp < state.placed_at:
+                continue
+            if trade.trade_id:
+                seen = state.model_state.setdefault("_seen_trades", set())
+                if trade.trade_id in seen:
+                    continue
+                seen.add(trade.trade_id)
             new_fills = self.limit_fill_model.on_trade(state, trade)
             produced.extend(self._settle_limit_fills(oid, state, new_fills, trade.timestamp))
         return produced

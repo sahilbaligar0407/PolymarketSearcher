@@ -45,6 +45,9 @@ strategies:
     enabled: true
     evidence: B
     class: marketlab.strategies.controls:FadeStrategy
+    # Results before this version are void (FINDINGS 57: a doubled NO-side probability
+    # flip, or mean_reversion's price-vs-return mix-up). Retired on sight.
+    invalidated_versions: ["1.0.0"]
     universes: [btc_1h, sports_nfl]
     variants:
       fades: [momentum, copy_trader]
@@ -71,6 +74,9 @@ strategies:
     enabled: true
     evidence: A
     class: marketlab.strategies.mean_reversion:MeanReversionStrategy
+    # Results before this version are void (FINDINGS 57: a doubled NO-side probability
+    # flip, or mean_reversion's price-vs-return mix-up). Retired on sight.
+    invalidated_versions: ["1.0.0"]
     universes: [btc_15m, btc_1h, altcoin_1h, index_15m]
     variants:
       lookback_seconds: [300, 900, 3600]
@@ -133,6 +139,9 @@ strategies:
     enabled: true
     evidence: B
     class: marketlab.strategies.cross_venue:CrossVenueRelativeValueStrategy
+    # Results before this version are void (FINDINGS 57: a doubled NO-side probability
+    # flip, or mean_reversion's price-vs-return mix-up). Retired on sight.
+    invalidated_versions: ["1.0.0"]
     # Polymarket is the SIGNAL source; every order goes to Kalshi.
     # Sports game-winner pairs are proven structurally (marketlab/matching/sports.py);
     # the other universes trade only if the general matcher ever approves a pair.
@@ -149,6 +158,9 @@ strategies:
     enabled: true
     evidence: B
     class: marketlab.strategies.btc_event:BtcEventStrategy
+    # Results before this version are void (FINDINGS 57: a doubled NO-side probability
+    # flip, or mean_reversion's price-vs-return mix-up). Retired on sight.
+    invalidated_versions: ["1.0.0", "1.1.0"]
     universes: [btc_15m, btc_1h, btc_daily]
     variants:
       vol_window_minutes: [15, 60, 240]
@@ -157,9 +169,17 @@ strategies:
     variant_limit: 9
 
   sports_consensus:
-    enabled: true
+    # Off 2026-10-05 (FINDINGS 57): with no odds feed wired (THE_ODDS_API_KEY unset) only
+    # `market_only` trades, and it prices EVERY sports contract - either team's
+    # moneyline, spreads, totals, season wins - at one neutral-Elo constant (0.5925), and
+    # trades mid-game because no game-state feed exists. Re-enable with real ratings, a
+    # per-market YES=home/away mapping and a hard pregame cutoff.
+    enabled: false
     evidence: B
     class: marketlab.strategies.sports_consensus:SportsConsensusStrategy
+    # Results before this version are void (FINDINGS 57: a doubled NO-side probability
+    # flip, or mean_reversion's price-vs-return mix-up). Retired on sight.
+    invalidated_versions: ["1.0.0"]
     # +$10.43 net over 25h despite a 34.3% win rate - it buys underpriced longshots, so
     # low win rate is expected and fine. sports_mlb is the best market in the whole
     # tournament (+$27.26); sports_college is the worst sports market (27.3% win,
@@ -176,6 +196,9 @@ strategies:
     enabled: true
     evidence: B
     class: marketlab.strategies.weather:WeatherForecastStrategy
+    # Results before this version are void (FINDINGS 57: a doubled NO-side probability
+    # flip, or mean_reversion's price-vs-return mix-up). Retired on sight.
+    invalidated_versions: ["1.0.0", "1.1.0", "1.2.0"]
     universes: [weather_daily_high, weather_hourly]
     variants:
       min_edge: [0.04, 0.08]
@@ -186,6 +209,9 @@ strategies:
     enabled: true
     evidence: F
     class: marketlab.strategies.news_probability:NewsProbabilityStrategy
+    # Results before this version are void (FINDINGS 57: a doubled NO-side probability
+    # flip, or mean_reversion's price-vs-return mix-up). Retired on sight.
+    invalidated_versions: ["1.0.0", "1.1.0", "2.0.0", "2.1.0"]
     universes: [politics_general, economics_inflation, economics_fed, companies_events]
     # AI stack arms (marketlab/ai/stack.py). This is the PRD's "AI-enhanced vs
     # Jev-enhanced vs non-AI" comparison:
@@ -326,6 +352,9 @@ strategies:
     enabled: false
     evidence: B
     class: marketlab.strategies.ensemble:EnsembleStrategy
+    # Results before this version are void (FINDINGS 57: a doubled NO-side probability
+    # flip, or mean_reversion's price-vs-return mix-up). Retired on sight.
+    invalidated_versions: ["1.0.0"]
     universes: []
     variants: {}
     notes: >

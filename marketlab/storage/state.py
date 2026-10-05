@@ -612,7 +612,11 @@ class StateStore:
             "cannot infer a timestamp for this portfolio snapshot; pass as_of explicitly"
         )
 
-    def save_portfolio(self, portfolio: Portfolio, as_of: datetime | None = None) -> None:
+    def save_portfolio(
+        self, portfolio: Portfolio, as_of: datetime | None = None, marks: dict[str, Decimal] | None = None
+    ) -> None:
+        """Persist positions and a balance row. Pass ``marks`` (see Portfolio.equity) for
+        mark-to-market equity; without them equity is cash + cost (FINDINGS 58)."""
         ts = as_of or self._infer_portfolio_timestamp(portfolio)
         with self._lock, self._conn:
             for pos in portfolio.positions.values():
@@ -652,9 +656,9 @@ class StateStore:
                     portfolio.strategy_id,
                     _dts(ts),
                     str(portfolio.cash),
-                    str(portfolio.equity()),
+                    str(portfolio.equity(marks)),
                     str(portfolio.realized_pnl),
-                    str(portfolio.unrealized_pnl()),
+                    str(portfolio.unrealized_pnl(marks)),
                     str(portfolio.exposure()),
                     str(portfolio.high_water_mark),
                     str(portfolio.max_drawdown),

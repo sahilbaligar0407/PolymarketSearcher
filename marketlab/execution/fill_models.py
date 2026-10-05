@@ -248,8 +248,11 @@ class TradeThroughFillModel(LimitFillModel):
         at_limit = trade.price == book_price
 
         if strictly_through:
+            # A print through the limit proves the market reached past this order - but
+            # only for the size that actually printed. Crediting the whole order filled
+            # 25 contracts off 3-contract prints (FINDINGS 58).
             order_state.model_state[self._ACCUM_KEY] = 0
-            return [(order_state.limit_price, qty)]
+            return [(order_state.limit_price, min(qty, trade.size))]
 
         if at_limit:
             accum = order_state.model_state.get(self._ACCUM_KEY, 0) + trade.size

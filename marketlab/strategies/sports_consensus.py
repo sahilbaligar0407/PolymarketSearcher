@@ -45,7 +45,7 @@ from decimal import Decimal
 from typing import Any
 
 from marketlab.core.events import BookUpdateEvent, ExternalPriceEvent, SportsStateEvent
-from marketlab.core.instruments import ONE, Side
+from marketlab.core.instruments import Side
 from marketlab.core.orders import Action, Order, OrderStatus, OrderType, TimeInForce
 from marketlab.core.probability import american_to_probability
 from marketlab.core.strategy import ProbabilityForecast
@@ -67,7 +67,7 @@ class SportsConsensusStrategy(BaseStrategy):
     """
 
     name = "sports_consensus"
-    version = "1.0.0"
+    version = "1.1.0"  # 1.1.0: FINDINGS 57
     evidence_class = "B"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
@@ -194,8 +194,10 @@ class SportsConsensusStrategy(BaseStrategy):
         if price_yes is not None:
             candidates.append((Side.YES, price_yes, self.edge_after_costs(model_probability, price_yes, market, Side.YES)))
         if price_no is not None:
-            no_p = clamp_probability(ONE - model_probability)
-            candidates.append((Side.NO, price_no, self.edge_after_costs(no_p, price_no, market, Side.NO)))
+            # P(YES) for both sides: edge_after_costs -> expected_edge converts it to P(NO) itself.
+            # Passing 1 - P here flipped it twice and bought NO when the model said YES
+            # (FINDINGS 57).
+            candidates.append((Side.NO, price_no, self.edge_after_costs(model_probability, price_no, market, Side.NO)))
         if not candidates:
             return
         side, price, edge = max(candidates, key=lambda c: c[2])

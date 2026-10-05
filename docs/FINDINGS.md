@@ -435,3 +435,37 @@ is still held; the market maker (1.2.0) places its ask as BUY NO at 1 - ask, col
 the way Kalshi fills it. Versions 1.0.0 and 1.1.0 are marked invalidated and their
 sleeves retire on sight, positions or not. A result that good, that fast, deserved an
 audit before a celebration.
+
+**57. Five strategies bet NO whenever their model said YES.** `expected_edge` converts
+P(YES) to P(NO) for a NO trade; seven call sites passed it `1 - P(YES)` first, so the two
+flips cancelled and a NO candidate was scored as `P(YES) - NO price`. btc_event bought NO
+at 0.22 with its model at 0.988 YES; cross_venue bought NO at 0.16 where both venues
+priced YES at 0.845. Of the NO fills, 101/137 (btc_event), 87/95 (cross_venue), 54/114
+(sports_consensus), 32/55 (news_probability) and 4/12 (weather) went against the
+strategy's own model; settled, those lost every time. fade_control only ever traded
+because of it (it now trades unconditionally, as a control should). Also found:
+mean_reversion compared a price to a mean *return* (~0), so its model was always mid -
+0.10 and all 120 fills were NO; sports_consensus priced every sports contract - either
+team, spreads, totals, season wins - at one neutral-Elo constant (0.5925) and traded
+mid-game (now disabled); the game matcher's +/-1 day fallback paired 9 Kalshi games with
+the adjacent day's game; ensemble compared two sets with `>=` (a superset test); weather
+tails lacked the half-degree continuity correction. A regression test now fails if any
+strategy hands the edge helper a pre-flipped probability. Every affected strategy is a new
+version with its earlier versions invalidated.
+
+**58. The fill simulator and risk gate were too generous in five ways.** (a) REST polling
+re-delivered the latest 20 prints every pass (~4.5x each) and fills ignored when a print
+happened: 28% of maker fills came from prints stamped before the order existed. (b) A
+print through the limit filled the whole order whatever its size (25 contracts off a
+3-contract print). (c) Resting orders counted toward neither exposure nor cash, so a sleeve
+rested $98 against a $20 cap. (d) The per-event cap was per-market and the category and
+cluster caps were handed the whole portfolio's exposure, so they could never fire: a
+sleeve held $19.79 across 7 strikes of one BTC hour under a $4 "event" cap. (e) Equity
+for the pause rules and stored balances ignored marks (cash + cost). Plus: after every
+restart each sleeve had two Portfolio objects, the broker trading one while the runner
+saved a frozen other (4,244 conflicting balance rows); caps used the global capital, not
+each sleeve's bankroll. Each is fixed with a test: prints are deduplicated and must
+post-date the order; a print fills at most its own size; resting buys reserve cash and
+count toward every cap; the event cap spans every market of the event and the cluster cap
+the series; pauses and balances use mark-to-market; recovery reuses the runner's
+portfolios; caps scale per sleeve.

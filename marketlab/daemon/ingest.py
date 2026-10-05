@@ -31,6 +31,7 @@ import json
 import os
 import random
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -567,6 +568,8 @@ class IngestService:
         )
         self.poly_us = PolymarketUsAdapter(settings.sources.poly_us_rest, clock)
         self._poly_us_seen: set[str] = set()
+        #: Kalshi trade ids already enqueued (bounded, oldest evicted first).
+        self._seen_trade_ids: OrderedDict[str, None] = OrderedDict()
         #: Shared with the runner (set by the supervisor); filled by _loop_poly_holdings.
         self.holdings_book: Any | None = None
         #: Match discovery state: the Kalshi catalogue index (rebuilt hourly), the
@@ -973,6 +976,14 @@ class IngestService:
                             event = trade_event_from_raw(raw_trade, self.clock, "kalshi_rest")
                         except (KeyError, ValueError):
                             continue
+                        # Each pass returns the latest 20 prints again; pass each on once.
+                        tid = event.trade.trade_id
+                        if tid:
+                            if tid in self._seen_trade_ids:
+                                continue
+                            self._seen_trade_ids[tid] = None
+                            if len(self._seen_trade_ids) > 200_000:
+                                self._seen_trade_ids.popitem(last=False)
                         self._enqueue(event)
                         trade_rows.append(trade_to_parquet_row(event.trade))
                         trades_ok += 1

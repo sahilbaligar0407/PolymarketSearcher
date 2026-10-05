@@ -233,13 +233,15 @@ def test_touch_model_fills_sell_side_on_bid_touch():
     assert fills == [(Decimal("0.60"), 10)]
 
 
-def test_trade_through_strict_print_fills_in_full():
+def test_trade_through_strict_print_fills_only_the_size_that_printed():
     state = _state(remaining_quantity=10, limit_price=Decimal("0.50"))
     model = TradeThroughFillModel()
     # A print strictly better (lower) than our buy limit proves the market walked
-    # through our level.
-    trade = Trade(canonical_id="mkt-1", venue=Venue.KALSHI, timestamp=TS, price=Decimal("0.48"), size=1)
-    assert model.on_trade(state, trade) == [(Decimal("0.50"), 10)]
+    # through our level - for the size that printed, not for our whole order.
+    small = Trade(canonical_id="mkt-1", venue=Venue.KALSHI, timestamp=TS, price=Decimal("0.48"), size=1)
+    assert model.on_trade(state, small) == [(Decimal("0.50"), 1)]
+    big = Trade(canonical_id="mkt-1", venue=Venue.KALSHI, timestamp=TS, price=Decimal("0.48"), size=40)
+    assert model.on_trade(state, big) == [(Decimal("0.50"), 10)]
 
 
 def test_build_limit_fill_model_factory():

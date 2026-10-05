@@ -38,7 +38,7 @@ from decimal import Decimal
 from typing import Any
 
 from marketlab.core.events import BookUpdateEvent, TimerEvent, WeatherEvent
-from marketlab.core.instruments import ONE, Category, Side
+from marketlab.core.instruments import Category, Side
 from marketlab.core.orders import Action, OrderType
 from marketlab.core.probability import normal_cdf
 from marketlab.core.strategy import ProbabilityForecast
@@ -138,7 +138,7 @@ class WeatherForecastStrategy(BaseStrategy):
     """Prices Kalshi weather-threshold contracts against the latest NWS forecast."""
 
     name = "weather_forecast"
-    version = "1.2.0"
+    version = "1.3.0"  # 1.3.0: FINDINGS 57
     evidence_class = "B"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
@@ -242,15 +242,19 @@ class WeatherForecastStrategy(BaseStrategy):
             if threshold is None:
                 return
             # Kalshi writes tails as symbols (">98°", "<70°"); words are the fallback.
+            # Highs settle as whole degrees, so a strict tail needs a half-degree continuity
+            # correction: ">98" is a high of 99+, i.e. X >= 98.5; "<70" is 69 or less,
+            # X <= 69.5. Using 98 and 70 overstated p_yes by up to ~6 points at sigma 3.
+            edge_f = float(threshold)
             if "<" in market.title:
-                below = True
+                below, edge_f = True, edge_f - 0.5
             elif ">" in market.title:
-                below = False
+                below, edge_f = False, edge_f + 0.5
             else:
                 below = is_below_threshold_contract(f"{market.title} {market.description}")
             comparator = "<=" if below else ">="
             p_yes = forecast_to_threshold_probability(
-                float(forecast_state["latest"]), float(threshold), sigma_effective, comparator
+                float(forecast_state["latest"]), edge_f, sigma_effective, comparator
             )
         model_probability = clamp_probability(Decimal(str(round(p_yes, 6))))
 
@@ -290,8 +294,10 @@ class WeatherForecastStrategy(BaseStrategy):
         if price_yes is not None:
             candidates.append((Side.YES, price_yes, self.edge_after_costs(model_probability, price_yes, market, Side.YES)))
         if price_no is not None:
-            no_p = clamp_probability(ONE - model_probability)
-            candidates.append((Side.NO, price_no, self.edge_after_costs(no_p, price_no, market, Side.NO)))
+            # P(YES) for both sides: edge_after_costs -> expected_edge converts it to P(NO) itself.
+            # Passing 1 - P here flipped it twice and bought NO when the model said YES
+            # (FINDINGS 57).
+            candidates.append((Side.NO, price_no, self.edge_after_costs(model_probability, price_no, market, Side.NO)))
         if not candidates:
             return
         side, price, edge = max(candidates, key=lambda c: c[2])

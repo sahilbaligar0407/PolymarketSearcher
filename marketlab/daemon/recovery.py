@@ -109,6 +109,17 @@ class RecoveryService:
 
         marks = self.books.mark_prices()
         for exp in experiments:
+            # A sleeve the runner already loaded keeps that one Portfolio object. Loading a
+            # second copy here replaced the registry entry, so after every restart the
+            # broker traded one object while the runner snapshotted and death-checked a
+            # frozen other, and both were persisted (4,244 conflicting balance rows,
+            # FINDINGS 58).
+            existing = self.portfolios.get(exp.experiment_id)
+            if existing is not None:
+                summary.experiments_restored += 1
+                summary.total_equity += existing.equity(marks)
+                summary.positions_restored += sum(1 for p in existing.positions.values() if p.quantity > 0)
+                continue
             try:
                 portfolio = store.load_portfolio(exp.experiment_id)
             except Exception as exc:  # noqa: BLE001

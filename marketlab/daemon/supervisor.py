@@ -482,10 +482,15 @@ class Supervisor:
                 await self.runner.snapshot()
         if self.store is not None and self.portfolio_registry is not None and self.book_registry is not None:
             marks = self.book_registry.mark_prices()
+            # The runner just saved its own sleeves; saving them again wrote two balance
+            # rows per sleeve per snapshot. Only the rest (sleeves kept to settle) here.
+            runner_owned = set(getattr(self.runner, "_sleeves", {}) or {})
             for portfolio in self.portfolio_registry.all().values():
+                if portfolio.experiment_id in runner_owned:
+                    continue
                 portfolio.mark(marks)
                 with contextlib.suppress(Exception):
-                    self.store.save_portfolio(portfolio, as_of=now)
+                    self.store.save_portfolio(portfolio, as_of=now, marks=marks)
 
     async def _on_promotion(self, now: datetime) -> None:
         """Construct the promotion engine and prove the wiring is live.

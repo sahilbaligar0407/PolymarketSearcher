@@ -39,10 +39,10 @@ from decimal import Decimal
 from typing import Any
 
 from marketlab.core.events import ExternalPriceEvent, TimerEvent
-from marketlab.core.instruments import ONE, Side
+from marketlab.core.instruments import Side
 from marketlab.core.orders import Action, OrderType
 from marketlab.matching import approved_for_automation
-from marketlab.strategies.base import BaseStrategy, clamp_probability
+from marketlab.strategies.base import BaseStrategy
 
 DEFAULT_MIN_OPEN_INTEREST = Decimal("1")
 DEFAULT_MAX_BOOK_STALENESS_SECONDS = 10.0
@@ -62,7 +62,7 @@ class CrossVenueRelativeValueStrategy(BaseStrategy):
     """
 
     name = "cross_venue"
-    version = "1.0.0"
+    version = "1.1.0"  # 1.1.0: FINDINGS 57
     evidence_class = "B"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
@@ -169,9 +169,10 @@ class CrossVenueRelativeValueStrategy(BaseStrategy):
             edge_yes = self.edge_after_costs(model_probability, price_yes, market_a, Side.YES)
             candidates.append((Side.YES, price_yes, edge_yes))
         if price_no is not None:
-            edge_no = self.edge_after_costs(
-                clamp_probability(ONE - model_probability), price_no, market_a, Side.NO
-            )
+            # P(YES) for both sides: edge_after_costs -> expected_edge converts it to P(NO) itself.
+            # Passing 1 - P here flipped it twice and bought NO when the model said YES
+            # (FINDINGS 57).
+            edge_no = self.edge_after_costs(model_probability, price_no, market_a, Side.NO)
             candidates.append((Side.NO, price_no, edge_no))
         if not candidates:
             self._refuse("no_executable_price")

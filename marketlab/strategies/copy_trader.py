@@ -460,6 +460,9 @@ class CopyBasketStrategy(CopyTraderStrategy):
 
     def _execute_copy(self, entry: dict[str, Any]) -> None:
         canonical_id = entry["canonical_id"]
+        if self.should_skip(canonical_id) is not None:  # stale, crossed, locked or closed
+            self._refuse("book_unusable_at_execution")
+            return
         market = self.ctx.market(canonical_id)
         if market is None:
             self._refuse("no_market")

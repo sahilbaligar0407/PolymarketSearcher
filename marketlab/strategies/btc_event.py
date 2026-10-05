@@ -117,7 +117,7 @@ class BtcEventStrategy(BaseStrategy):
     """Prices BTC threshold contracts against a driftless-GBM model of spot."""
 
     name = "btc_event"
-    version = "1.1.0"
+    version = "1.2.0"  # 1.2.0: FINDINGS 57
     evidence_class = "B"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
@@ -256,8 +256,10 @@ class BtcEventStrategy(BaseStrategy):
         if price_yes is not None:
             candidates.append((Side.YES, price_yes, self.edge_after_costs(model_probability, price_yes, market, Side.YES)))
         if price_no is not None:
-            no_model_p = clamp_probability(Decimal(1) - model_probability)
-            candidates.append((Side.NO, price_no, self.edge_after_costs(no_model_p, price_no, market, Side.NO)))
+            # P(YES) for both sides: edge_after_costs -> expected_edge converts it to P(NO) itself.
+            # Passing 1 - P here flipped it twice and bought NO when the model said YES
+            # (FINDINGS 57).
+            candidates.append((Side.NO, price_no, self.edge_after_costs(model_probability, price_no, market, Side.NO)))
         if not candidates:
             return
         side, price, edge = max(candidates, key=lambda c: c[2])

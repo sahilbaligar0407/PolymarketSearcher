@@ -693,3 +693,90 @@ async def test_selling_more_than_is_held_is_refused_not_paid() -> None:
     order = await broker.submit(_intent(action=Action.SELL, quantity=5))
     assert order.status is OrderStatus.REJECTED and "no short selling" in order.reject_detail
     assert portfolio.cash == Decimal("100")
+
+
+async def test_prints_from_before_the_order_or_seen_twice_never_fill_it() -> None:
+    """2026-10-05: re-polled prints filled orders again, and prints older than the order."""
+    from datetime import timedelta
+
+    from marketlab.core.instruments import BookLevel, Trade
+    from marketlab.core.orders import OrderStatus
+
+    market = _market()
+    book = _book(asks=(BookLevel(price=Decimal("0.60"), size=5),))
+    portfolio = _portfolio(cash=Decimal("100"))
+    clock = SimulatedClock(TS)
+    broker = _make_broker(
+        clock=clock, market_provider=lambda cid: market,
+        book_provider=lambda cid: book, portfolio_provider=lambda eid: portfolio,
+    )
+    order = await broker.submit(_intent(order_type=OrderType.LIMIT, limit_price=Decimal("0.50"), quantity=10))
+    assert order.status is OrderStatus.OPEN
+
+    def print_(at, tid: str):  # noqa: ANN001, ANN202
+        return Trade(canonical_id="mkt-1", venue=Venue.KALSHI, timestamp=at,
+                     price=Decimal("0.48"), size=4, trade_id=tid)
+
+    assert await broker.on_trade(print_(TS - timedelta(seconds=30), "old")) == []
+    first = await broker.on_trade(print_(TS + timedelta(seconds=1), "t1"))
+    again = await broker.on_trade(print_(TS + timedelta(seconds=1), "t1"))
+    assert sum(f.quantity for f in first) == 4 and again == []
+
+
+def _real_gateway() -> RiskGateway:
+    return RiskGateway(RiskConfig(strict_audit=False))  # production caps: 4% event, 20% strategy
+
+
+async def test_resting_orders_count_toward_the_strategy_cap() -> None:
+    """2026-10-05: a sleeve rested $98 of orders against a $20 cap."""
+    from marketlab.core.instruments import BookLevel
+    from marketlab.core.orders import OrderStatus
+
+    markets = {f"m{i}": _market(canonical_id=f"m{i}", event_id=f"e{i}") for i in range(10)}
+    portfolio = _portfolio(cash=Decimal("100"), initial_capital=Decimal("100"))
+    broker = _make_broker(
+        clock=SimulatedClock(TS), market_provider=markets.get, book_provider=lambda cid: _book(asks=(BookLevel(price=Decimal("0.60"), size=5),), canonical_id=cid),
+        portfolio_provider=lambda eid: portfolio, risk_gateway=_real_gateway(),
+    )
+    statuses = []
+    for i in range(10):  # $3.50 resting each, below the $4 event cap
+        o = await broker.submit(_intent(canonical_id=f"m{i}", order_type=OrderType.LIMIT,
+                                        limit_price=Decimal("0.35"), quantity=10))
+        statuses.append(o.status)
+    assert statuses.count(OrderStatus.OPEN) == 5  # 5 x $3.50 = $17.50; a 6th would pass $20
+    assert portfolio.exposure() == 0
+
+
+async def test_the_event_cap_spans_every_market_of_the_event() -> None:
+    """2026-10-05: $19.79 across 7 strikes of one BTC hour against a $4 'per-event' cap."""
+    from marketlab.core.instruments import BookLevel
+    from marketlab.core.orders import OrderStatus
+
+    markets = {f"k{i}": _market(canonical_id=f"k{i}", event_id="KXBTCD-26OCT0517") for i in range(3)}
+    portfolio = _portfolio(cash=Decimal("100"), initial_capital=Decimal("100"))
+    broker = _make_broker(
+        clock=SimulatedClock(TS), market_provider=markets.get, book_provider=lambda cid: _book(asks=(BookLevel(price=Decimal("0.60"), size=5),), canonical_id=cid),
+        portfolio_provider=lambda eid: portfolio, risk_gateway=_real_gateway(),
+    )
+    first = await broker.submit(_intent(canonical_id="k0", order_type=OrderType.LIMIT,
+                                        limit_price=Decimal("0.30"), quantity=10))
+    second = await broker.submit(_intent(canonical_id="k1", order_type=OrderType.LIMIT,
+                                         limit_price=Decimal("0.30"), quantity=10))
+    assert first.status is OrderStatus.OPEN
+    assert second.status is OrderStatus.REJECTED and "max_single_event_loss_pct" in second.reject_detail
+
+
+async def test_caps_scale_with_the_sleeves_own_bankroll() -> None:
+    from marketlab.core.instruments import BookLevel
+    from marketlab.core.orders import OrderStatus
+
+    for capital, expected in (("50", OrderStatus.REJECTED), ("100", OrderStatus.OPEN)):
+        portfolio = _portfolio(cash=Decimal(capital), initial_capital=Decimal(capital))
+        broker = _make_broker(
+            clock=SimulatedClock(TS), market_provider=lambda cid: _market(), book_provider=lambda cid: _book(asks=(BookLevel(price=Decimal("0.60"), size=5),), canonical_id=cid),
+            portfolio_provider=lambda eid, p=portfolio: p,
+            risk_gateway=RiskGateway(RiskConfig(strict_audit=False, initial_capital=Decimal("100"))),
+        )
+        # $3.00 resting: inside 4% of $100, outside 4% of $50
+        order = await broker.submit(_intent(order_type=OrderType.LIMIT, limit_price=Decimal("0.30"), quantity=10))
+        assert order.status is expected, capital

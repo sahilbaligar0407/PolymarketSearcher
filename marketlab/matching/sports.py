@@ -23,6 +23,7 @@ up) is simply not matched: a missed pair costs an opportunity, a wrong pair cost
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -30,6 +31,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from marketlab.core.instruments import NormalizedMarket
 from marketlab.logging import get_logger
@@ -37,7 +39,10 @@ from marketlab.matching.cross_venue import MarketMatch
 
 log = get_logger(__name__)
 
-VALIDATOR_VERSION = "sports-moneyline-1.0"
+_EASTERN = ZoneInfo("America/New_York")
+
+#: 1.1: offset-day pairs require the Eastern start date (FINDINGS 57); 1.0 rows are void.
+VALIDATOR_VERSION = "sports-moneyline-1.1"
 MATCH_CONFIDENCE = Decimal("0.97")
 
 #: Kalshi game series -> Polymarket slug league prefix.
@@ -82,6 +87,8 @@ class PolyGame:
     game_date: date
     codes: tuple[str, str]
     outcomes: tuple[str, str]
+    #: The game's start (``gameStartTime``) as a US Eastern date - Kalshi's own dating.
+    start_et: date | None = None
 
 
 def parse_kalshi_game(market: NormalizedMarket) -> KalshiGame | None:
@@ -133,7 +140,14 @@ def parse_poly_game(market: NormalizedMarket) -> PolyGame | None:
         game_date = date.fromisoformat(m["date"])
     except ValueError:
         return None
-    return PolyGame(market, m["league"], game_date, (m["a"], m["b"]), (str(outcomes[0]), str(outcomes[1])))
+    start_et: date | None = None
+    with contextlib.suppress(ValueError, TypeError):
+        start = datetime.fromisoformat(str(raw.get("gameStartTime")).replace("Z", "+00:00").replace(" ", "T"))
+        if start.tzinfo is not None:
+            start_et = start.astimezone(_EASTERN).date()
+    return PolyGame(
+        market, m["league"], game_date, (m["a"], m["b"]), (str(outcomes[0]), str(outcomes[1])), start_et
+    )
 
 
 def codes_match(league: str, kalshi_code: str, poly_code: str) -> bool:
@@ -199,6 +213,12 @@ def match_games(
         for offset in (0, 1, -1):
             hits = []
             for pg in polys.get((kg.league, kg.game_date + timedelta(days=offset)), []):
+                # A +/-1 day slug is only the same game when the start time, in Eastern,
+                # is Kalshi's date (a late game rolled over in UTC). Without this check
+                # back-to-back series paired a Kalshi game with the previous or next
+                # day's game - 9 such double twins were approved (FINDINGS 57).
+                if offset and pg.start_et != kg.game_date:
+                    continue
                 aligned = split_teams(kg.league, kg.teams, pg.codes)
                 if aligned is not None:
                     hits.append((pg, aligned))

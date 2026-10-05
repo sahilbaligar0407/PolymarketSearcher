@@ -178,7 +178,7 @@ class DashboardData:
                 SELECT x.experiment_id,
                        (SELECT equity FROM balances
                         WHERE experiment_id = x.experiment_id AND timestamp >= ?
-                        ORDER BY timestamp LIMIT 1) AS equity
+                        ORDER BY timestamp, id LIMIT 1) AS equity
                 FROM experiments x
                 """,
                 (today,),

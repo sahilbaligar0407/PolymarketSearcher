@@ -17,7 +17,7 @@ from marketlab.core.events import (
     TimerEvent,
     TraderActionEvent,
 )
-from marketlab.core.instruments import ONE, Side
+from marketlab.core.instruments import Side
 from marketlab.core.orders import Action, OrderType
 from marketlab.signals.technical import bounded_momentum
 from marketlab.strategies.base import BaseStrategy, clamp_probability
@@ -102,7 +102,7 @@ class FadeStrategy(BaseStrategy):
     """
 
     name = "fade_control"
-    version = "1.0.0"
+    version = "1.1.0"  # 1.1.0: FINDINGS 57
     evidence_class = "B"
 
     def on_book_update(self, event: BookUpdateEvent) -> None:
@@ -154,7 +154,8 @@ class FadeStrategy(BaseStrategy):
         price = self.executable_price(book, fade_side, Action.BUY)
         if price is None:
             return
-        model_p = clamp_probability(ONE - mid if fade_side is Side.NO else mid)
+        # P(YES) whichever side is faded (the edge helper flips it for NO itself).
+        model_p = clamp_probability(mid)
         edge = self.edge_after_costs(model_p, price, market, fade_side)
         quantity = self.sensible_quantity(price)
         intent = self.make_intent(
@@ -180,8 +181,10 @@ class FadeStrategy(BaseStrategy):
             model_probability=model_p,
             expected_edge=edge,
         )
-        if self.emit_if_profitable(intent):
-            self.mark_fired(canonical_id)
+        # A control takes its side unconditionally, like the random control. Requiring a
+        # positive edge meant fade only ever traded through the double-flip bug (FINDINGS 57).
+        self.emit(intent)
+        self.mark_fired(canonical_id)
 
     def _fade_copy_trader(self, event: TraderActionEvent) -> None:
         """Recompute the naive "copy this wallet's side" signal and take the other side."""
@@ -208,7 +211,8 @@ class FadeStrategy(BaseStrategy):
         mid = book.mid
         if mid is None:
             return
-        model_p = clamp_probability(ONE - mid if fade_side is Side.NO else mid)
+        # P(YES) whichever side is faded (the edge helper flips it for NO itself).
+        model_p = clamp_probability(mid)
         edge = self.edge_after_costs(model_p, price, market, fade_side)
         quantity = self.sensible_quantity(price)
         intent = self.make_intent(
@@ -233,8 +237,10 @@ class FadeStrategy(BaseStrategy):
             model_probability=model_p,
             expected_edge=edge,
         )
-        if self.emit_if_profitable(intent):
-            self.mark_fired(canonical_id)
+        # A control takes its side unconditionally, like the random control. Requiring a
+        # positive edge meant fade only ever traded through the double-flip bug (FINDINGS 57).
+        self.emit(intent)
+        self.mark_fired(canonical_id)
 
 
 class DoNothingStrategy(BaseStrategy):

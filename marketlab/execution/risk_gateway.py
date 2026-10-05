@@ -62,6 +62,14 @@ class RiskDecision:
     detail: str = ""
 
 
+def cluster_key(market: NormalizedMarket) -> str:
+    """The correlated cluster a market belongs to: its series (the event ticker up to
+    the first ``-``), so every hour of KXBTCD - or every game of one league series -
+    shares one cap. Event-level concentration is the per-event cap's job."""
+    event = market.event_id or market.canonical_id
+    return event.split("-", 1)[0].upper()
+
+
 def _is_reducing(intent: OrderIntent, portfolio: Portfolio) -> bool:
     """A SELL that shrinks an existing position is "reducing"; everything else "increases"
     exposure. There is no shorting in this system (no leverage/borrowing), so a SELL can
@@ -130,8 +138,17 @@ class RiskGateway:
         category_exposures: dict[Category, Decimal],
         cluster_exposures: dict[str, Decimal],
         daily_pnl: Decimal,
+        *,
+        marks: dict[str, Decimal] | None = None,
+        open_order_exposure: Decimal = ZERO,
+        event_exposure: Decimal | None = None,
     ) -> RiskDecision:
+        """``category_exposures`` / ``cluster_exposures`` / ``event_exposure`` include the
+        sleeve's resting buy orders; ``open_order_exposure`` is their total, reserved
+        against cash and the strategy cap. Every cap scales with the sleeve's own
+        ``initial_capital`` (FINDINGS 58)."""
         cfg = self.config
+        capital = portfolio.initial_capital if portfolio.initial_capital > ZERO else cfg.initial_capital
 
         # --- Global kill switch: overrides every strategy, model and config. -----
         if self.kill_switch_engaged() and not _is_reducing(intent, portfolio):
@@ -187,7 +204,7 @@ class RiskGateway:
             )
 
         # --- Pause gates: existing positions may still be closed. -----------------
-        daily_loss_floor = -(cfg.daily_loss_pause_pct * cfg.initial_capital)
+        daily_loss_floor = -(cfg.daily_loss_pause_pct * capital)
         if not reducing and daily_pnl <= daily_loss_floor:
             return self._reject(
                 "daily_loss_pause",
@@ -204,8 +221,7 @@ class RiskGateway:
         #
         # Peak-to-trough drawdown is still recorded and still reported - it is a headline
         # research metric - it just is not what trips the trading halt.
-        capital = cfg.initial_capital
-        equity = portfolio.equity()
+        equity = portfolio.equity(marks)
         capital_drawdown = (
             (capital - equity) / capital if capital > ZERO and equity < capital else ZERO
         )
@@ -226,11 +242,13 @@ class RiskGateway:
             return RiskDecision(approved=True)
 
         # --- No leverage, no borrowing. ---------------------------------------------
-        if not cfg.leverage and not cfg.borrowing and intent.action is Action.BUY and cost > portfolio.cash:
+        free_cash = portfolio.cash - open_order_exposure
+        if not cfg.leverage and not cfg.borrowing and intent.action is Action.BUY and cost > free_cash:
             return self._reject(
                 "insufficient_cash",
                 RejectReason.INSUFFICIENT_CASH,
-                f"cost {cost} exceeds available cash {portfolio.cash}",
+                f"cost {cost} exceeds available cash {free_cash} "
+                f"({portfolio.cash} less {open_order_exposure} reserved by resting orders)",
             )
 
         # --- Per-event loss cap (approximated at the single-market level: Portfolio has
@@ -241,7 +259,13 @@ class RiskGateway:
             (p.cost_basis for k, p in portfolio.positions.items() if p.canonical_id == market.canonical_id and p.quantity > 0),
             ZERO,
         )
-        max_event_loss = cfg.max_single_event_loss_pct * cfg.initial_capital
+        # When the caller can see the whole event (every market sharing event_id, e.g. an
+        # hour's BTC strike ladder or both teams of a game, plus resting orders), the cap
+        # applies to that; it used to be one canonical_id, so a sleeve held $19.79 across
+        # 7 strikes of one hour against a $4 "per-event" cap.
+        if event_exposure is not None:
+            existing_market_exposure = event_exposure
+        max_event_loss = cfg.max_single_event_loss_pct * capital
         if existing_market_exposure + cost > max_event_loss:
             return self._reject(
                 "single_event_loss",
@@ -251,19 +275,20 @@ class RiskGateway:
             )
 
         # --- Strategy-level exposure cap. --------------------------------------------
-        max_strategy_exposure = cfg.max_strategy_exposure_pct * cfg.initial_capital
-        if portfolio.exposure() + cost > max_strategy_exposure:
+        max_strategy_exposure = cfg.max_strategy_exposure_pct * capital
+        committed = portfolio.exposure() + open_order_exposure
+        if committed + cost > max_strategy_exposure:
             return self._reject(
                 "strategy_exposure",
                 RejectReason.RISK_GATE,
-                f"prospective strategy exposure {portfolio.exposure() + cost} exceeds "
-                f"max_strategy_exposure_pct cap {max_strategy_exposure}",
+                f"prospective strategy exposure {committed + cost} (incl. {open_order_exposure} "
+                f"resting) exceeds max_strategy_exposure_pct cap {max_strategy_exposure}",
             )
 
         # --- Category exposure cap. `category_exposures` is caller-supplied (typically
         # aggregated by a portfolio-wide layer outside this broker); we only add this
         # trade's prospective cost to whatever the caller already measured. -----------
-        max_category_exposure = cfg.max_category_exposure_pct * cfg.initial_capital
+        max_category_exposure = cfg.max_category_exposure_pct * capital
         existing_category = category_exposures.get(market.category, ZERO)
         if existing_category + cost > max_category_exposure:
             return self._reject(
@@ -277,8 +302,10 @@ class RiskGateway:
         # NormalizedMarket; we use `event_id` as the cluster key (markets that share an
         # event are the most obviously correlated group we can identify without an
         # external correlation graph). ------------------------------------------------
-        max_cluster_exposure = cfg.max_correlated_cluster_pct * cfg.initial_capital
-        existing_cluster = cluster_exposures.get(market.event_id, ZERO)
+        max_cluster_exposure = cfg.max_correlated_cluster_pct * capital
+        existing_cluster = cluster_exposures.get(
+            cluster_key(market), cluster_exposures.get(market.event_id, ZERO)
+        )
         if existing_cluster + cost > max_cluster_exposure:
             return self._reject(
                 "cluster_exposure",

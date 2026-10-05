@@ -54,7 +54,7 @@ from marketlab.core.events import (
 from marketlab.core.instruments import ONE, Side
 from marketlab.core.orders import Action, OrderType
 from marketlab.core.strategy import ProbabilityForecast
-from marketlab.strategies.base import BaseStrategy, clamp_probability
+from marketlab.strategies.base import BaseStrategy
 
 DEFAULT_LARGE_MOVE_THRESHOLD = Decimal("0.05")
 DEFAULT_SCHEDULED_REFRESH_SECONDS = 1800.0
@@ -104,7 +104,7 @@ class NewsProbabilityStrategy(BaseStrategy):
     """Trades a Kalshi contract against a validated LLM probability assessment."""
 
     name = "news_probability"
-    version = "2.1.0"
+    version = "2.2.0"  # 2.2.0: FINDINGS 57
     evidence_class = "F"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
@@ -393,8 +393,10 @@ class NewsProbabilityStrategy(BaseStrategy):
         if price_yes is not None:
             candidates.append((Side.YES, price_yes, self.edge_after_costs(model_probability, price_yes, market, Side.YES)))
         if price_no is not None:
-            no_p = clamp_probability(ONE - model_probability)
-            candidates.append((Side.NO, price_no, self.edge_after_costs(no_p, price_no, market, Side.NO)))
+            # P(YES) for both sides: edge_after_costs -> expected_edge converts it to P(NO) itself.
+            # Passing 1 - P here flipped it twice and bought NO when the model said YES
+            # (FINDINGS 57).
+            candidates.append((Side.NO, price_no, self.edge_after_costs(model_probability, price_no, market, Side.NO)))
         if not candidates:
             return None
         best = max(candidates, key=lambda c: c[2])

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
-from marketlab.core.instruments import ONE, Side
+from marketlab.core.instruments import Side
 from marketlab.core.orders import Action, OrderType
 from marketlab.core.strategy import ProbabilityForecast
 from marketlab.strategies.base import BaseStrategy, clamp_probability
@@ -93,7 +93,7 @@ class EnsembleStrategy(BaseStrategy):
     """Combines QUALIFIED component forecasts into one Kalshi trade, or none."""
 
     name = "ensemble"
-    version = "1.0.0"
+    version = "1.1.0"  # 1.1.0: FINDINGS 57
     evidence_class = "B"
 
     def __init__(self, strategy_id: str, experiment_id: str, ctx: Any, params: dict | None = None) -> None:
@@ -143,7 +143,7 @@ class EnsembleStrategy(BaseStrategy):
         if len(majority_families) < min_agreeing:
             return
 
-        majority_yes = families_yes >= families_no
+        majority_yes = len(families_yes) >= len(families_no)  # sizes, not a superset test
         contributing = [c for c in relevant if c.family in majority_families]
         weights = self.weights()
         weighted_sum = sum((weights.get(c.strategy_id, Decimal(0)) * c.forecast.p_yes for c in contributing), Decimal(0))  # type: ignore[union-attr]
@@ -161,7 +161,7 @@ class EnsembleStrategy(BaseStrategy):
             return
 
         side = Side.YES if majority_yes else Side.NO
-        model_p = ensemble_p if side is Side.YES else clamp_probability(ONE - ensemble_p)
+        model_p = ensemble_p  # P(YES) for both sides; the edge helper flips it for NO
         price = self.executable_price(book, side, Action.BUY)
         if price is None:
             return

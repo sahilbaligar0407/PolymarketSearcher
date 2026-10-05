@@ -58,7 +58,7 @@ class MeanReversionStrategy(BaseStrategy):
     """Fades stretched short-term moves back toward the market's own recent center."""
 
     name = "mean_reversion"
-    version = "1.0.0"
+    version = "1.1.0"  # 1.1.0: FINDINGS 57
     evidence_class = "A"
 
     def on_trade(self, event: TradeEvent) -> None:
@@ -160,11 +160,14 @@ class MeanReversionStrategy(BaseStrategy):
         # down -> buy NO. Oversold (z < 0) -> buy YES.
         side = Side.NO if z > 0 else Side.YES
 
-        deviation = float(mid) - (mean or 0.0)
+        # The stretched quantity is the latest *move* (a return), so revert a fraction of
+        # that move. Until 1.1.0 this was `mid - mean_return`: a price minus a ~0 return,
+        # i.e. ~mid, so the adjustment sat at max_adj and model_p was always mid - 0.10 -
+        # it could only ever buy NO, on every up-tick (FINDINGS 57).
+        deviation = float(latest_return) - (mean or 0.0)
         gain = float(self.param("reversion_gain", DEFAULT_REVERSION_GAIN))
         max_adj = float(self.param("max_adjustment", DEFAULT_MAX_ADJUSTMENT))
         adjustment = max(-max_adj, min(max_adj, deviation * gain))
-        # Partial reversion toward the mean: subtract a fraction of the deviation.
         model_p = clamp_probability(mid - Decimal(str(adjustment)))
 
         price = self.executable_price(book, side, Action.BUY)

@@ -182,6 +182,8 @@ def _event_canonical_id(event: BaseEvent) -> str | None:
 
 #: Strategy families that read ``params["matches"]``.
 MATCH_CONSUMERS = frozenset({"cross_venue", "copy_trader", "copy_basket"})
+#: Matcher versions whose approvals are no longer trusted.
+VOID_VALIDATOR_VERSIONS = frozenset({"sports-moneyline-1.0"})
 #: Strategies driven by the leaderboard holdings snapshot (marketlab.signals.holdings).
 HOLDINGS_CONSUMERS = frozenset({"holdings_blind", "holdings_edge", "holdings_confirm"})
 
@@ -713,7 +715,13 @@ class ExperimentRunner:
         except Exception:  # noqa: BLE001 - keep the previous book on a read failure
             log.error("runner.match_refresh_failed", exc_info=True)
             return len(self.match_book)
-        self.match_book.replace([m for m in rows if approved_for_automation(m)])
+        # Only pairs certified by a validator version still in force: a bumped version
+        # means the old one's approvals were wrong (e.g. sports-moneyline-1.0 paired
+        # adjacent-day games), and the new one re-certifies the good pairs itself.
+        self.match_book.replace([
+            m for m in rows
+            if approved_for_automation(m) and str(m.validator_version) not in VOID_VALIDATOR_VERSIONS
+        ])
         try:
             roster = {r["wallet"]: float(r["score"]) for r in self.store.trader_scores(status="QUALIFIED")}
         except Exception:  # noqa: BLE001 - a store without the table simply has no roster
@@ -926,8 +934,9 @@ class ExperimentRunner:
         # instant; a partially-written calibration record is worse than a slow one.
         self._flush_forecasts(force=True)
         for sleeve in self._sleeves.values():
-            sleeve.portfolio.mark(self._marks_for_portfolio(sleeve.portfolio))
-            self.store.save_portfolio(sleeve.portfolio, as_of=now)
+            marks = self._marks_for_portfolio(sleeve.portfolio)
+            sleeve.portfolio.mark(marks)
+            self.store.save_portfolio(sleeve.portfolio, as_of=now, marks=marks)
         self._last_snapshot = now
         board = self.leaderboard()
         log.info("runner.snapshot", at=now.isoformat(), n_sleeves=len(self._sleeves), n_active=sum(1 for s in self._sleeves.values() if s.status not in _INACTIVE_STATUSES))
