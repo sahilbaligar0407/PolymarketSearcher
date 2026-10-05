@@ -586,3 +586,47 @@ def test_state_store_context_manager_closes(tmp_path: Path) -> None:
     store.close()
     with pytest.raises(sqlite3.ProgrammingError):
         store.get_experiment("exp_1")
+
+
+def test_a_hard_kill_loses_no_fills_the_live_checkpoint_wins(tmp_path) -> None:
+    """2026-10-05: balances are written every 5 min; fills since then were lost on a kill."""
+    from datetime import UTC, datetime, timedelta
+    from decimal import Decimal
+
+    from marketlab.core.instruments import Side, Venue
+    from marketlab.core.orders import Action, Fill
+    from marketlab.core.portfolio import Portfolio
+    from marketlab.storage.state import StateStore
+
+    t0 = datetime(2026, 10, 5, 4, 0, tzinfo=UTC)
+    store = StateStore(tmp_path / "live.db")
+    store.create_experiment(_mk_experiment())
+    p = Portfolio(experiment_id="exp_1", strategy_id="s", initial_capital=Decimal("100"), cash=Decimal("100"))
+    store.save_portfolio(p, as_of=t0)  # the 5-minute snapshot
+    p.apply_fill(Fill(order_id="o", canonical_id="kalshi:x", venue=Venue.KALSHI, side=Side.YES,
+                      action=Action.BUY, price=Decimal("0.40"), quantity=10, fee=Decimal("0.02"),
+                      timestamp=t0 + timedelta(minutes=2)))
+    store.save_portfolio_live(p, t0 + timedelta(minutes=2))  # what the broker writes per fill
+    store.close()
+
+    reloaded = StateStore(tmp_path / "live.db").load_portfolio("exp_1")
+    assert reloaded is not None
+    assert reloaded.cash == Decimal("95.98")
+    assert reloaded.positions[Portfolio.key("kalshi:x", Side.YES)].quantity == 10
+
+
+def test_a_newer_snapshot_supersedes_an_older_checkpoint(tmp_path) -> None:
+    from datetime import UTC, datetime, timedelta
+    from decimal import Decimal
+
+    from marketlab.core.portfolio import Portfolio
+    from marketlab.storage.state import StateStore
+
+    t0 = datetime(2026, 10, 5, 4, 0, tzinfo=UTC)
+    store = StateStore(tmp_path / "live2.db")
+    store.create_experiment(_mk_experiment())
+    p = Portfolio(experiment_id="exp_1", strategy_id="s", initial_capital=Decimal("100"), cash=Decimal("90"))
+    store.save_portfolio_live(p, t0)
+    p.cash = Decimal("80")
+    store.save_portfolio(p, as_of=t0 + timedelta(minutes=5))
+    assert store.load_portfolio("exp_1").cash == Decimal("80")

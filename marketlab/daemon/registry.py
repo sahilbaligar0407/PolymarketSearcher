@@ -22,15 +22,13 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from marketlab.core.instruments import (
-    ONE,
     Category,
     NormalizedMarket,
     OrderBook,
     Side,
     Venue,
-    to_probability,
 )
-from marketlab.core.portfolio import Portfolio
+from marketlab.core.portfolio import Portfolio, liquidation_mark
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -287,11 +285,10 @@ class BookRegistry:
                 book = entry.latest
                 if book is None:
                     continue
-                mid = book.mid
-                if mid is None:
-                    continue
-                marks[Portfolio.key(cid, Side.YES)] = mid
-                marks[Portfolio.key(cid, Side.NO)] = to_probability(ONE - mid)
+                for side in (Side.YES, Side.NO):
+                    mark = liquidation_mark(book, side)
+                    if mark is not None:
+                        marks[Portfolio.key(cid, side)] = mark
         return marks
 
 

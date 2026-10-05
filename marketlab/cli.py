@@ -17,6 +17,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -111,6 +112,20 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _signal_stop(pid: int) -> None:
+    """Ask the daemon to shut down cleanly (it polls a stop file every heartbeat), then
+    fall back to a signal if it is still alive after a minute."""
+    from marketlab.daemon.supervisor import STOP_REQUEST_PATH
+
+    STOP_REQUEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STOP_REQUEST_PATH.write_text(f"stop requested for pid {pid}\n", encoding="utf-8")
+    for _ in range(60):
+        if not _pid_alive(pid):
+            return
+        time.sleep(1)
+    _signal_kill(pid)
+
+
+def _signal_kill(pid: int) -> None:
     if os.name == "nt":
         with contextlib.suppress(OSError):
             os.kill(pid, signal.CTRL_BREAK_EVENT)

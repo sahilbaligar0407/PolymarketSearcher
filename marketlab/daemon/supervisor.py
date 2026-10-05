@@ -67,6 +67,8 @@ log = get_logger(__name__)
 #: tick/snapshot cadences -- promotion is a judgment about weeks of history, not seconds.
 PROMOTION_INTERVAL_SECONDS = 6 * 3600.0
 HEARTBEAT_INTERVAL_SECONDS = 30.0
+#: Written by `marketlab paper stop` / `kill`; the heartbeat loop shuts down cleanly on it.
+STOP_REQUEST_PATH = Path(__file__).resolve().parents[2] / "data" / "STOP_REQUEST"
 #: No progress for this long kills the process so START_TRADING.bat restarts it.
 BOOT_HANG_LIMIT_SECONDS = 1200.0
 RUN_HANG_LIMIT_SECONDS = 600.0
@@ -687,6 +689,15 @@ class Supervisor:
                 break
             if self._watchdog is not None:
                 self._watchdog.beat()
+            # A stop request file is the shutdown path that works on Windows: the console
+            # signal never reached this process, so every "stop" was a hard kill and the
+            # graceful shutdown (final snapshot, forecast flush) had never once run.
+            stop_file = STOP_REQUEST_PATH
+            if stop_file.exists():
+                with contextlib.suppress(OSError):
+                    stop_file.unlink()
+                log.info("stop_request_received", path=str(stop_file))
+                self.request_shutdown()
             try:
                 status = self.build_status()
                 self._last_heartbeat = self.clock.now()
@@ -781,6 +792,12 @@ class _PaperBrokerStoreBridge:
         self._experiment_by_order: dict[str, str] = {}
         #: order_id -> fills seen before that order row existed. See save_fill.
         self._pending_fills: dict[str, list[Any]] = {}
+
+    def save_portfolio_live(self, portfolio: Any, at: Any) -> None:
+        try:
+            self._store.save_portfolio_live(portfolio, at)
+        except Exception as exc:  # noqa: BLE001 - persistence must never break trading
+            log.error("persist_portfolio_live_failed", experiment_id=portfolio.experiment_id, error=str(exc))
 
     def save_order(self, order: Any) -> None:
         self._experiment_by_order[order.order_id] = order.experiment_id

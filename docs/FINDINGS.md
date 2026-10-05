@@ -469,3 +469,16 @@ post-date the order; a print fills at most its own size; resting buys reserve ca
 count toward every cap; the event cap spans every market of the event and the cluster cap
 the series; pauses and balances use mark-to-market; recovery reuses the runner's
 portfolios; caps scale per sleeve.
+
+**59. Every restart lost the fills since the last snapshot, because no stop was ever
+graceful.** Fills are written the moment they happen; cash and positions only every 5
+minutes, plus on shutdown. On Windows the console stop signal never reached the daemon,
+so all 11 restarts (and any crash or dead battery) were hard kills: `supervisor_shutdown_
+begin` appears in no log. 299 fills across 99 sleeves were in the fills table but not in
+the sleeves' cash or positions (~$286 of overstated cash, their wins and losses never
+booked). Now the broker writes an exact per-sleeve checkpoint on every fill and
+settlement and boot loads whichever is newer, so a kill loses nothing; and `stop` writes
+a request file that the heartbeat loop acts on, so shutdowns are clean again. Also from
+the accounting audit: positions were marked at the raw mid (a 4c position on a 1c/99c
+book counted as 50c) - now at the price they could be sold for, or at cost when the book
+is wider than 20c; and the broker now refuses limit prices off the market's tick grid.

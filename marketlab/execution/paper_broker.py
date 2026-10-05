@@ -50,7 +50,7 @@ from marketlab.core.orders import (
     RejectReason,
     TimeInForce,
 )
-from marketlab.core.portfolio import Portfolio
+from marketlab.core.portfolio import Portfolio, liquidation_mark
 from marketlab.execution.fill_models import LimitFillModel, OrderState, walk_book
 from marketlab.execution.latency import LatencyModel
 from marketlab.execution.risk_gateway import RiskGateway
@@ -272,11 +272,9 @@ class PaperBroker(Broker):
             if pos.quantity <= 0:
                 continue
             history = self._book_history.get(pos.canonical_id)
-            book = history[-1] if history else None
-            mid = book.mid if book is not None else None
-            if mid is None:
-                continue
-            marks[k] = mid if pos.side is Side.YES else ONE - mid
+            mark = liquidation_mark(history[-1] if history else None, pos.side)
+            if mark is not None:
+                marks[k] = mark
         return marks
 
     def _daily_pnl(self, portfolio: Portfolio) -> Decimal:
@@ -315,6 +313,11 @@ class PaperBroker(Broker):
     def _persist_fill(self, fill: Fill) -> None:
         if self.store is not None and hasattr(self.store, "save_fill"):
             self.store.save_fill(fill)
+
+    def _checkpoint(self, portfolio: Portfolio | None) -> None:
+        """Write the sleeve's exact state after a fill or settlement (crash safety)."""
+        if portfolio is not None and self.store is not None and hasattr(self.store, "save_portfolio_live"):
+            self.store.save_portfolio_live(portfolio, self.clock.now())
 
     def load_open_orders(self, store: StateStoreLike | None = None) -> None:
         """Recovery: rebuild resting-order state from a StateStore after a restart.
@@ -415,6 +418,18 @@ class PaperBroker(Broker):
             return self._reject_new(
                 intent, RejectReason.NO_LIQUIDITY, "unknown market", decision_time, send_time, arrival_time
             )
+
+        # Limit prices must be on the venue's grid: off-grid quotes (0.15601725...) rested
+        # and filled at prices that cannot trade on Kalshi (FINDINGS 59).
+        if intent.order_type is OrderType.LIMIT and intent.limit_price is not None:
+            tick = market.tick_size if market.tick_size and market.tick_size > ZERO else Decimal("0.01")
+            px = intent.limit_price
+            if px < tick or px > ONE - tick or (px / tick) % 1 != 0:
+                return self._reject_new(
+                    intent, RejectReason.INVALID_PRICE,
+                    f"limit {px} is off the {tick} tick grid or outside [{tick}, {ONE - tick}]",
+                    decision_time, send_time, arrival_time,
+                )
 
         # No naked sells. Selling contracts the sleeve does not hold credited their cash
         # while the position merely floored at zero - free money with no liability -
@@ -592,6 +607,8 @@ class PaperBroker(Broker):
         for f in fills:
             portfolio.apply_fill(f)
             self._persist_fill(f)
+        if fills:
+            self._checkpoint(portfolio)
         self.taker_fills += len(fills)
         status = OrderStatus.FILLED if result.unfilled_qty == 0 else OrderStatus.PARTIALLY_FILLED
         return order.model_copy(
@@ -646,6 +663,8 @@ class PaperBroker(Broker):
             for f in fills:
                 portfolio.apply_fill(f)
                 self._persist_fill(f)
+            if fills:
+                self._checkpoint(portfolio)
             self.taker_fills += len(fills)
 
         remaining = order.quantity - crossed_qty
@@ -749,6 +768,8 @@ class PaperBroker(Broker):
         for f in fills:
             portfolio.apply_fill(f)
             self._persist_fill(f)
+        if fills:
+            self._checkpoint(portfolio)
         self.maker_fills += len(fills)
         state.remaining_quantity -= total_qty
 
@@ -875,6 +896,7 @@ class PaperBroker(Broker):
         for exp_id in list(self._experiments_by_market.get(canonical_id, ())):
             portfolio = self.portfolio_provider(exp_id)
             portfolio.settle(canonical_id, winning_side)
+            self._checkpoint(portfolio)
 
         for oid in list(self._resting_by_market.get(canonical_id, ())):
             order = self._orders.get(oid)

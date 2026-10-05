@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -94,6 +95,24 @@ class Position(BaseModel):
         self.quantity = 0
         self.average_price = ZERO
         return realized
+
+
+#: Books wider than this are not a price; a position there is carried at cost.
+MAX_MARK_SPREAD = Decimal("0.20")
+
+
+def liquidation_mark(book: Any, side: Side) -> Decimal | None:
+    """What a held contract could be sold for now: YES at the best bid, NO at 1 - the
+    best ask. ``None`` (carry at cost) when that side is empty or the spread is wider
+    than :data:`MAX_MARK_SPREAD`. The raw mid valued a 4c position on a 1c/99c book at
+    50c, inflating equity and hiding losses from the pause rules (FINDINGS 59).
+    """
+    if book is None:
+        return None
+    bid, ask = book.best_bid, book.best_ask
+    if bid is None or ask is None or ask - bid > MAX_MARK_SPREAD:
+        return None
+    return bid if side is Side.YES else ONE - ask
 
 
 class Portfolio(BaseModel):

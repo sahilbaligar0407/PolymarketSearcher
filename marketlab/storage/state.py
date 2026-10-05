@@ -672,6 +672,26 @@ class StateStore:
                 ),
             )
 
+    def save_portfolio_live(self, portfolio: Portfolio, at: datetime) -> None:
+        """Overwrite this sleeve's exact checkpoint (see migration 004). Called by the
+        broker after every fill and settlement, so a hard kill loses nothing."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO portfolio_live (experiment_id, updated_at, payload) VALUES (?, ?, ?)",
+                (portfolio.experiment_id, _dts(at), portfolio.model_dump_json()),
+            )
+
+    def _load_portfolio_live(self, experiment_id: str, newer_than: str | None) -> Portfolio | None:
+        row = self._conn.execute(
+            "SELECT updated_at, payload FROM portfolio_live WHERE experiment_id = ?", (experiment_id,)
+        ).fetchone()
+        if row is None or (newer_than is not None and row[0] < newer_than):
+            return None
+        try:
+            return Portfolio.model_validate_json(row[1])
+        except ValueError:
+            return None
+
     def load_portfolio(self, experiment_id: str) -> Portfolio | None:
         with self._lock:
             balance_row = self._conn.execute(
@@ -679,7 +699,12 @@ class StateStore:
                 (experiment_id,),
             ).fetchone()
             if balance_row is None:
-                return None
+                return self._load_portfolio_live(experiment_id, None)
+            # The live checkpoint is written on every fill and settlement; the balance
+            # row only every snapshot. Whichever is newer is the truth.
+            live = self._load_portfolio_live(experiment_id, balance_row["timestamp"])
+            if live is not None:
+                return live
             position_rows = self._conn.execute(
                 "SELECT * FROM positions WHERE experiment_id = ?", (experiment_id,)
             ).fetchall()

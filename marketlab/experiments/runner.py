@@ -48,9 +48,9 @@ from marketlab.core.events import (
     TraderActionEvent,
     WeatherEvent,
 )
-from marketlab.core.instruments import ONE, NormalizedMarket, OrderBook, Side
+from marketlab.core.instruments import NormalizedMarket, OrderBook, Side
 from marketlab.core.orders import OrderStatus, RejectReason
-from marketlab.core.portfolio import Portfolio, SleeveStatus
+from marketlab.core.portfolio import Portfolio, SleeveStatus, liquidation_mark
 from marketlab.core.strategy import Strategy, StrategyContext, UniverseContext
 from marketlab.experiments import identity as identity_mod
 from marketlab.experiments.identity import ExperimentIdentity
@@ -639,10 +639,11 @@ class ExperimentRunner:
     def _marks_for_portfolio(self, portfolio: Portfolio) -> dict[str, Decimal]:
         out: dict[str, Decimal] = {}
         for key, pos in portfolio.positions.items():
-            mid = self._marks.get(pos.canonical_id)
-            if mid is None:
-                continue
-            out[key] = mid if pos.side is Side.YES else (ONE - mid)
+            # The same liquidation mark the broker's risk gate uses; this used to be the
+            # book mid, overwritten by the last trade print.
+            mark = liquidation_mark(self._books.get(pos.canonical_id), pos.side)
+            if mark is not None:
+                out[key] = mark
         return out
 
     # ------------------------------------------------------------------

@@ -780,3 +780,15 @@ async def test_caps_scale_with_the_sleeves_own_bankroll() -> None:
         # $3.00 resting: inside 4% of $100, outside 4% of $50
         order = await broker.submit(_intent(order_type=OrderType.LIMIT, limit_price=Decimal("0.30"), quantity=10))
         assert order.status is expected, capital
+
+
+def test_positions_are_marked_at_what_they_could_be_sold_for() -> None:
+    from marketlab.core.instruments import BookLevel
+    from marketlab.core.portfolio import liquidation_mark
+
+    tight = _book(bids=(BookLevel(price=Decimal("0.40"), size=5),), asks=(BookLevel(price=Decimal("0.42"), size=5),))
+    assert liquidation_mark(tight, Side.YES) == Decimal("0.40")
+    assert liquidation_mark(tight, Side.NO) == Decimal("0.58")
+    # A 1c/99c book says nothing about value: carry at cost rather than at a 50c mid.
+    wide = _book(bids=(BookLevel(price=Decimal("0.01"), size=5),), asks=(BookLevel(price=Decimal("0.99"), size=5),))
+    assert liquidation_mark(wide, Side.YES) is None
