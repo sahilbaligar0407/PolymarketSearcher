@@ -292,6 +292,8 @@ class Supervisor:
         self._watchdog.beat("recovery")
         recovery_summary = await recovery.restore(self.store, self._raw_broker, self.runner)
         log.info("recovery_summary", detail=recovery_summary.render())
+        if hasattr(self.runner, "cancel_orphaned_orders"):
+            await self.runner.cancel_orphaned_orders()
 
         await self.ingest.start()
         self.started_at = self.clock.now()

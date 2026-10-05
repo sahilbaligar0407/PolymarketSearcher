@@ -637,6 +637,9 @@ class RequotingStrategy(Strategy):
 class RestingFakeBroker(FakeBroker):
     """Rests every order unfilled, and really cancels."""
 
+    async def open_orders(self, strategy_id: str | None = None) -> list[Order]:
+        return [o for o in self._orders.values() if not o.is_terminal]
+
     def __init__(self) -> None:
         super().__init__()
         self.cancelled: list[str] = []
@@ -728,4 +731,48 @@ async def test_risk_rejected_intents_back_off_instead_of_resubmitting_every_tick
     clock.advance(61)
     await runner.dispatch(_book_event("KXBTC-TEST", clock.now()))
     assert broker.submitted == 2
+    runner.store.close()
+
+
+async def test_superseded_cohorts_are_retired_when_the_bankroll_changes(tmp_path) -> None:
+    clock = SimulatedClock(T0)
+    runner = _make_runner(tmp_path / "s.db", {"KXBTC-TEST": {"uni_1"}}, clock)
+    await runner.load_or_create_sleeves([_variant("recording", _RECORDING_PATH)])
+    old_id = next(iter(runner._sleeves))
+    runner.store.close()
+
+    # The same variant at a new bankroll is a new cohort, and the $50 one is superseded.
+    runner2 = ExperimentRunner(
+        settings=_settings(bankroll="100.00"),
+        clock=clock,
+        store=StateStore(tmp_path / "s.db"),
+        broker=FakeBroker(),
+        market_registry=FakeMarketRegistry({"KXBTC-TEST": {"uni_1"}}),
+        book_registry=FakeBookRegistry(),
+        broker_owns_portfolio=False,
+    )
+    await runner2.load_or_create_sleeves([_variant("recording", _RECORDING_PATH)])
+    assert old_id not in runner2._sleeves and len(runner2._sleeves) == 1
+    assert str(runner2.store.get_experiment(old_id).status.value) == "DISABLED"
+    assert next(iter(runner2._sleeves.values())).portfolio.initial_capital == Decimal("100.00")
+    runner2.store.close()
+
+
+async def test_resting_orders_of_sleeves_that_no_longer_run_are_cancelled(tmp_path) -> None:
+    clock = SimulatedClock(T0)
+    runner = _make_runner(tmp_path / "o.db", {"KXBTC-TEST": {"uni_1"}}, clock)
+    broker = RestingFakeBroker()
+    runner.broker = broker
+    await runner.load_or_create_sleeves([_variant("requoting", "tests.unit.test_runner:RequotingStrategy")])
+    await runner.dispatch(_book_event("KXBTC-TEST", T0))
+    own = next(iter(next(iter(runner._sleeves.values())).strategy.resting))
+    orphan = (await broker.submit(OrderIntent(
+        strategy_id="gone", experiment_id="RETIRED_SLEEVE", canonical_id="KXBTC-TEST", venue=Venue.KALSHI,
+        side=Side.YES, action=Action.BUY, quantity=1, order_type=OrderType.LIMIT,
+        limit_price=Decimal("0.30"), time_in_force=TimeInForce.GTC, decision_time=T0, rationale="test",
+    ))).order_id
+
+    assert await runner.cancel_orphaned_orders() == 1
+    assert broker.cancelled == [orphan]
+    assert own not in broker.cancelled
     runner.store.close()

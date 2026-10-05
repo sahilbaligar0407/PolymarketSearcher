@@ -16,7 +16,7 @@ execution:
   uncertainty_buffer: "0.01"
 
 paper:
-  bankroll_per_strategy: "50.00"
+  bankroll_per_strategy: "100.00"
   tick_seconds: 1.0
   snapshot_seconds: 300.0
   max_concurrent_strategies: 400
@@ -57,6 +57,12 @@ ingest:
   # and weekly overall boards (<= 3N wallets, ~15 s to fetch at 8 in flight).
   poly_holdings_refresh_seconds: 900
   poly_holdings_top_n: 100
+  # Match discovery (marketlab/matching/discovery.py): every held / high-volume Polymarket
+  # market against the full Kalshi catalogue (~114k markets, rebuilt hourly), each
+  # candidate judged once by Jev. Needs TYPESAFE_API_KEY.
+  match_discovery_refresh_seconds: 1800
+  match_discovery_targets_per_pass: 400
+  match_discovery_candidates: 8
   poly_activity_refresh_seconds: 30
   gdelt_refresh_seconds: 900
   sec_refresh_seconds: 300

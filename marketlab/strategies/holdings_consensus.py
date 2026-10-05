@@ -16,6 +16,9 @@ The variants are the questions the manual process leaves open:
   price has run more than ``max_chase`` above the holders' average entry, or when less
   than ``min_remaining`` of upside is left ("$5 to make $0.50": a 0.91 contract pays 9%
   at best, and one miss erases ten wins).
+* ``sizing`` - ``fixed`` (3% of the bankroll per position) or ``kelly`` (a quarter of
+  the Kelly stake for the estimated probability, capped at 4%: more where the edge is
+  big, nothing where it is thin).
 * ``confirm`` - ``none``, ``news`` (a relevant story in the evidence cache), ``jev``
   (TypeSafe's Jev must put the outcome's probability above the price by ``jev_min_edge``)
   or ``news_jev`` (Jev, shown the headlines).
@@ -160,11 +163,17 @@ class HoldingsConsensusStrategy(BaseStrategy):
         p_outcome = clamp_probability(p_outcome)
         model_probability = p_outcome if side is Side.YES else ONE - p_outcome
         edge = self.edge_after_costs(model_probability, price, market, side)
-        quantity = self.sensible_quantity(price, risk_fraction=Decimal(str(self.param("risk_fraction", "0.03"))))
+        if str(self.param("sizing", "fixed")) == "kelly":
+            quantity = min(self.kelly_quantity(price, p_outcome), self.sensible_quantity(price, Decimal("0.04")))
+            if quantity <= 0:
+                self._refuse("kelly_no_bet")
+                return
+        else:
+            quantity = self.sensible_quantity(price, risk_fraction=Decimal(str(self.param("risk_fraction", "0.03"))))
 
         features: dict[str, Any] = {
             "board": self.board, "top_n": self.top_n, "net_only": self.net_only,
-            "entry": self.entry, "confirm": self.confirm,
+            "entry": self.entry, "confirm": self.confirm, "sizing": str(self.param("sizing", "fixed")),
             "holders": row.n_holders, "net_holders": row.net_holders, "opposing": len(row.opposing),
             "holders_usd": float(row.usd_value), "holders_avg_entry": float(row.avg_entry),
             "poly_price": float(row.cur_price), "kalshi_price": float(price),

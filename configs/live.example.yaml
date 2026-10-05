@@ -8,4 +8,4 @@ execution:
   max_book_age_seconds: 5.0
 
 paper:
-  bankroll_per_strategy: "50.00"
+  bankroll_per_strategy: "100.00"

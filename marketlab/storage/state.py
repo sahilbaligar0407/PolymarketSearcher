@@ -1090,6 +1090,15 @@ class StateStore:
             ).fetchall()
         return [self._row_to_match(r) for r in rows]
 
+    def evaluated_pairs(self, validator_version: str) -> set[tuple[str, str]]:
+        """(canonical_id_a, canonical_id_b) for every pair one validator already judged."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT canonical_id_a, canonical_id_b FROM market_matches WHERE validator_version = ?",
+                (validator_version,),
+            ).fetchall()
+        return {(r[0], r[1]) for r in rows}
+
     def approved_matches(self) -> list[MarketMatch]:
         """Matches that did not require human review, i.e. auto-approved."""
         with self._lock:

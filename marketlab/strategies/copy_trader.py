@@ -482,7 +482,7 @@ class CopyBasketStrategy(CopyTraderStrategy):
             return
 
         prospective_notional = price * Decimal(quantity)
-        cap = self._max_correlated_event_pct * Decimal(str(self.param("sleeve", "50.00")))
+        cap = self._max_correlated_event_pct * self.bankroll()
         existing = self._event_exposure.get(market.event_id, Decimal(0))
         if existing + prospective_notional > cap:
             self._refuse("correlated_event_cap")

@@ -236,13 +236,17 @@ class BaseStrategy(Strategy):
 
     # ------------------------------------------------------------------ sizing
 
+    def bankroll(self) -> Decimal:
+        """This sleeve's starting bankroll (the runner passes ``bankroll``; $50 historically)."""
+        return Decimal(str(self.param("bankroll", "50.00")))
+
     def sensible_quantity(
         self,
         price: Decimal,
         risk_fraction: Decimal = Decimal("0.03"),
-        sleeve: Decimal = Decimal("50.00"),
+        sleeve: Decimal | None = None,
         min_qty: int = 1,
-        max_qty: int = 25,
+        max_qty: int | None = None,
     ) -> int:
         """A small, sleeve-scaled contract count - never "as many as possible".
 
@@ -252,10 +256,31 @@ class BaseStrategy(Strategy):
         order came to $2.44 and was refused; 3% leaves headroom for price and rounding.
         Sizing that reliably trips the risk gate is not conservative, it is broken.
         """
+        sleeve = self.bankroll() if sleeve is None else sleeve
+        if max_qty is None:
+            max_qty = max(1, int(25 * sleeve / Decimal(50)))  # 25 contracts per $50
         price = clamp_probability(price)
         budget = sleeve * risk_fraction
         qty = int(budget / price) if price > ZERO else min_qty
         return max(min_qty, min(max_qty, qty))
+
+    def kelly_quantity(self, price: Decimal, p_win: Decimal) -> int:
+        """Contracts for a fractional-Kelly stake on a binary contract bought at ``price``.
+
+        Full Kelly for a contract paying $1 is ``f = (p - price) / (1 - price)`` of the
+        bankroll. ``kelly_fraction`` (default 1/4) shrinks it, because ``p_win`` is an
+        estimate and over-betting an overestimated edge is what ruins small bankrolls;
+        ``max_kelly_stake`` (default 0.04, the per-event loss cap) bounds it. Zero means
+        "no edge worth a bet". This is how a sleeve spreads a limited sum: more where the
+        estimated edge is large, less or nothing where it is thin.
+        """
+        price = clamp_probability(price)
+        if p_win <= price:
+            return 0
+        full = (p_win - price) / (ONE - price)
+        stake = full * Decimal(str(self.param("kelly_fraction", "0.25")))
+        stake = min(stake, Decimal(str(self.param("max_kelly_stake", "0.04"))))
+        return int(self.bankroll() * stake / price)
 
     # ------------------------------------------------------------------ intent construction
 

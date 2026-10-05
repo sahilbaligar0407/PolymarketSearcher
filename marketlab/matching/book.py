@@ -43,6 +43,13 @@ class MatchBook:
     def all(self) -> list[Any]:
         return list(self._by_kalshi.values())
 
+    def get(self, key: str, default: Any = None) -> Any:
+        """Like :meth:`MatchView.get`, across every universe."""
+        if not key:
+            return default
+        match = self.for_kalshi(key) or self.for_poly(key) or self.for_poly(f"poly:{key}")
+        return match if match is not None else default
+
     def __len__(self) -> int:
         return len(self._by_kalshi)
 

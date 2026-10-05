@@ -37,6 +37,8 @@ VALIDATOR_VERSION = "1.1.0"
 
 #: Mirrors ``configs/strategies.yaml: cross_venue.variants.require_match_confidence``.
 DEFAULT_MIN_MATCH_CONFIDENCE = Decimal("0.90")
+#: Approval bar for Jev-verified pairs (see approved_for_automation).
+JEV_MIN_IDENTICAL = Decimal("0.80")
 
 
 @dataclass(frozen=True)
@@ -176,4 +178,9 @@ def approved_for_automation(
         return False
     if match.human_review_required:
         return False
+    # A Jev-verified pair (marketlab.matching.discovery) carries Jev's p("identical"),
+    # a calibrated probability on its own scale: hand-labelled true pairs scored >= 0.81
+    # and false ones <= 0.21, so its approval bar is not the deterministic validator's.
+    if str(getattr(match, "validator_version", "")).startswith("jev-discovery"):
+        min_confidence = min(min_confidence, JEV_MIN_IDENTICAL)
     return match.match_confidence >= min_confidence

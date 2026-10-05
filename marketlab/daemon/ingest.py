@@ -569,6 +569,14 @@ class IngestService:
         self._poly_us_seen: set[str] = set()
         #: Shared with the runner (set by the supervisor); filled by _loop_poly_holdings.
         self.holdings_book: Any | None = None
+        #: Match discovery state: the Kalshi catalogue index (rebuilt hourly), the
+        #: Polymarket targets seen so far, and the twins it approved (book priority).
+        self._jev: Any | None = None
+        self._kalshi_catalog: Any | None = None
+        self._kalshi_catalog_at = datetime.min.replace(tzinfo=UTC)
+        self._poly_targets: dict[str, Any] = {}
+        self.discovered_kalshi: dict[str, NormalizedMarket] = {}
+        self.discovered_poly: dict[str, NormalizedMarket] = {}
 
         #: name -> why that adapter could not be constructed. Populated by
         #: _build_misc_adapters so `doctor` can report a wiring bug as a bug
@@ -902,7 +910,10 @@ class IngestService:
         )
         # Kalshi legs of approved cross-venue pairs always get a book; without one the
         # pair can never trade, however good the match.
-        matched = [m.venue_market_id for m in self.matched_kalshi_markets.values()][:sample]
+        matched = list(dict.fromkeys(
+            m.venue_market_id
+            for m in [*self.matched_kalshi_markets.values(), *self.discovered_kalshi.values()]
+        ))[: sample * 2]
         # Per-universe quotas: a global open-interest ranking always hands the book budget
         # to sports and BTC, so thin-but-real universes (weather: 4 of 325 open markets had
         # a book) could never be tested at all. Each quota universe gets its most active
@@ -1013,7 +1024,7 @@ class IngestService:
         all_poly = [m for m in self.markets.all() if m.venue is Venue.POLY_GLOBAL]
         # Markets with an approved Kalshi twin first: those are the books cross-venue and
         # copy trading actually read. The rest fill whatever sample remains.
-        matched = list(self.matched_poly_markets.values())
+        matched = list({**self.matched_poly_markets, **self.discovered_poly}.values())
         rest = [m for m in all_poly if m.canonical_id not in self.matched_poly_ids]
         poly_markets = (matched[: sample * 2] + rest)[: max(sample, min(len(matched), sample * 2))]
         if not poly_markets:
@@ -1350,6 +1361,151 @@ class IngestService:
                 kalshi=len(kalshi), poly=len(poly), saved=saved, approved=approved,
             )
         result.market_matches = saved
+
+    async def _discover_matches_once(self) -> dict[str, int]:
+        """Find Kalshi twins for the Polymarket markets that matter (marketlab.matching.discovery).
+
+        Targets, most important first: every market the top leaderboard wallets hold
+        (by holder count), then the high-volume Polymarket markets already catalogued.
+        Each (target, candidate) pair is judged by Jev once and persisted either way;
+        an approved pair makes both legs tradable (registry + store + book priority).
+        """
+        from marketlab.ai.typesafe import build_jev_client
+        from marketlab.matching import discovery as disc
+
+        if self.store is None:
+            return {}
+        if self._jev is None:
+            self._jev = build_jev_client(self.settings)
+        if self._jev is None:
+            log.info("match_discovery_skipped", reason="no TYPESAFE_API_KEY")
+            return {}
+
+        now = self.clock.now()
+        self._restore_discovered_twins(disc.VALIDATOR_VERSION)
+        if self._kalshi_catalog is None or (now - self._kalshi_catalog_at).total_seconds() > 3600:
+            events: list[dict[str, Any]] = []
+            cursor: str | None = None
+            for _ in range(200):
+                page = await self.kalshi_rest.get_events(
+                    limit=200, cursor=cursor, status="open", with_nested_markets=True
+                )
+                batch = page.get("events") or []
+                events.extend(batch)
+                cursor = page.get("cursor")
+                if not cursor or not batch:
+                    break
+            entries = disc.kalshi_entries_from_events(events)
+            self._kalshi_catalog = disc.KalshiCatalogIndex(entries)
+            self._kalshi_catalog_at = now
+            log.info("kalshi_catalog_built", events=len(events), markets=len(entries))
+        index = self._kalshi_catalog
+
+        held: dict[str, int] = {}
+        if self.holdings_book is not None:
+            for row in self.holdings_book.view("union", 100, False):
+                held[row.condition_id] = max(held.get(row.condition_id, 0), row.n_holders)
+        catalogued = {
+            m.venue_market_id: m
+            for m in self.store.list_markets(venue=Venue.POLY_GLOBAL.value, status="open")
+        }
+        missing = [cid for cid in held if cid not in self._poly_targets]
+        for i in range(0, len(missing), 40):
+            try:
+                raws = await self.poly_gamma.get_markets(
+                    limit=100, extra_params={"condition_ids": missing[i : i + 40]}
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("discovery_gamma_failed", error=str(exc))
+                continue
+            for raw in raws:
+                target = disc.poly_target_from_gamma(raw)
+                if target is not None:
+                    self._poly_targets[target.condition_id] = target
+        for cid, market in catalogued.items():
+            if cid not in self._poly_targets and isinstance(market.raw, dict):
+                target = disc.poly_target_from_gamma(market.raw)
+                if target is not None:
+                    self._poly_targets[cid] = target
+
+        done = self.store.evaluated_pairs(disc.VALIDATOR_VERSION)
+        judged_targets = {b for _, b in done}
+        order = sorted(self._poly_targets.values(), key=lambda t: -held.get(t.condition_id, 0))
+        budget = int(self._cfg.get("match_discovery_targets_per_pass", 400))
+        todo = [t for t in order if t.canonical_id not in judged_targets][:budget]
+        k = int(self._cfg.get("match_discovery_candidates", 8))
+        gate = asyncio.Semaphore(16)
+
+        async def judge(target: Any) -> list[Any]:
+            cands = [
+                (e, sc) for e, sc in index.candidates(target, k=k)
+                if (e.canonical_id, target.canonical_id) not in done
+            ]
+            if not cands:
+                return []
+            async with gate:
+                return await disc.verify(self._jev, target, cands)
+
+        results = await asyncio.gather(*(judge(t) for t in todo))
+        approved = 0
+        for verdicts in results:
+            for v in verdicts:
+                with contextlib.suppress(Exception):
+                    self.store.save_match(disc.verdict_to_match(v, now))
+                if v.approved:
+                    approved += 1
+                    self._adopt_twin(v)
+        log.info(
+            "match_discovery", targets=len(todo), judged=sum(len(r) for r in results),
+            approved=approved, held_targets=len(held), jev_calls=self._jev.calls,
+        )
+        return {"targets": len(todo), "approved": approved}
+
+    def _restore_discovered_twins(self, validator_version: str) -> None:
+        """Re-register both legs of every approved discovery pair (after a restart, or
+        when the bounded registry evicted them), so approved twins keep their books."""
+        try:
+            rows = [m for m in self.store.approved_matches() if m.validator_version == validator_version]
+        except Exception:  # noqa: BLE001
+            return
+        for match in rows:
+            for cid, bucket in ((match.canonical_id_a, self.discovered_kalshi), (match.canonical_id_b, self.discovered_poly)):
+                if self.markets.get(cid) is not None and cid in bucket:
+                    continue
+                market = self.store.get_market(cid)
+                if market is None or str(market.status.value) != "open":
+                    continue
+                bucket[cid] = market
+                if self.markets.get(cid) is None:
+                    self.markets.upsert(market)
+                    self._enqueue(market_update_event(market, self.clock, "match_discovery"))
+
+    def _adopt_twin(self, verdict: Any) -> None:
+        """Make both legs of a newly approved pair tradable and give them books."""
+        try:
+            kalshi = normalize_kalshi_market(verdict.entry.raw)
+            poly = normalize_poly_market(verdict.target.raw)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("discovery_twin_normalize_failed", ticker=verdict.entry.ticker, error=str(exc))
+            return
+        for market in (kalshi, poly):
+            self.markets.upsert(market)
+            if self.store is not None:
+                with contextlib.suppress(Exception):
+                    self.store.upsert_market(market)
+            self._enqueue(market_update_event(market, self.clock, "match_discovery"))
+        self.discovered_kalshi[kalshi.canonical_id] = kalshi
+        self.discovered_poly[poly.canonical_id] = poly
+
+    async def _loop_match_discovery(self) -> None:
+        interval = self._seconds("match_discovery_refresh_seconds", 1800)
+        await self.clock.sleep(120)  # let the first holdings snapshot land
+        while not self._stop.is_set():
+            try:
+                await self._discover_matches_once()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("match_discovery_failed", error=str(exc), exc_info=True)
+            await self.clock.sleep(interval)
 
     async def _loop_market_matches(self) -> None:
         interval = self._seconds("market_match_refresh_seconds", 900)
@@ -1782,6 +1938,7 @@ class IngestService:
         "poly_activity": "polymarket_global",
         "poly_us": "polymarket_us",
         "poly_holdings": "polymarket_global",
+        "match_discovery": "polymarket_global",
         "sec": "sec",
         "crypto_spot": "crypto_spot",
         "weather_nws": "weather_nws",
@@ -1820,6 +1977,7 @@ class IngestService:
             ("poly_activity", self._loop_poly_activity),
             ("poly_us", self._loop_poly_us),
             ("poly_holdings", self._loop_poly_holdings),
+            ("match_discovery", self._loop_match_discovery),
             ("sec", self._loop_sec),
             ("crypto_spot", self._loop_crypto_spot),
             ("weather_nws", self._loop_weather),

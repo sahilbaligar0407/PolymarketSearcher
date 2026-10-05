@@ -266,6 +266,8 @@ class ExperimentRunner:
         #: universe -> {canonical_id: market}; each sleeve's UniverseContext reads its own.
         self._universe_members: dict[str, dict[str, NormalizedMarket]] = {}
 
+        #: strategy_name -> the version the code ships, filled as sleeves load.
+        self._current_versions: dict[str, str] = {}
         self._bankroll_per_variant = Decimal(
             str((settings.strategies.get("meta", {}) or {}).get("bankroll_per_variant", "50.00"))
         )
@@ -316,6 +318,7 @@ class ExperimentRunner:
             stations = ((self.settings.universes.get("universes", {}) or {}).get(variant.universe, {}) or {}).get("stations")
             if stations and "stations" not in variant.params:
                 ai_params = {**ai_params, "stations": dict(stations)}
+            ai_params = {**ai_params, "bankroll": str(self._bankroll_per_variant)}
             if variant.strategy_name in MATCH_CONSUMERS:
                 ai_params = {
                     **ai_params,
@@ -326,13 +329,16 @@ class ExperimentRunner:
                 ai_params = {
                     **ai_params,
                     "holdings": self.holdings,
-                    "matches": MatchView(self.match_book, variant.universe, self._universes_for),
+                    # Every approved twin, not just this universe's: the holdings signal is
+                    # global, and most twins found by discovery sit in no sleeve universe.
+                    "matches": self.match_book,
                     "jev": self.jev,
                     "evidence": self.ai_stack.evidence if self.ai_stack is not None else None,
                 }
 
             strategy_id = f"{variant.strategy_name}__{variant.universe}__{identity_mod.parameter_hash(variant.params)}"
             strategy_version = str(getattr(strategy_cls, "version", "1.0.0"))
+            self._current_versions[variant.strategy_name] = strategy_version
             identity = self._build_identity(variant, strategy_version)
 
             # Resume an existing live sleeve for this cohort rather than minting a new
@@ -434,6 +440,80 @@ class ExperimentRunner:
                 portfolio=portfolio,
                 status=current_status,
             )
+        self.retire_superseded()
+
+    async def cancel_orphaned_orders(self) -> int:
+        """Cancel resting orders that belong to no running sleeve.
+
+        Recovery reloads every open order from storage, including the quotes of sleeves
+        that are retired or were superseded (still holding a position, so kept until it
+        settles). Their strategies no longer run, so nothing would ever manage those
+        orders - but they could still fill and keep changing a dead sleeve's book.
+        """
+        running = {eid for eid, sl in self._sleeves.items() if sl.status not in _INACTIVE_STATUSES}
+        cancelled = 0
+        try:
+            orders = await self.broker.open_orders()
+        except Exception:  # noqa: BLE001
+            return 0
+        for order in orders:
+            if order.experiment_id in running or order.is_terminal:
+                continue
+            with contextlib.suppress(Exception):
+                if await self.broker.cancel(order.order_id) is not None:
+                    cancelled += 1
+        if cancelled:
+            log.info("runner.orphaned_orders_cancelled", count=cancelled)
+        return cancelled
+
+    def retire_superseded(self) -> int:
+        """DISABLE live sleeves that the current config has explicitly replaced.
+
+        Only explicit signals count: a different starting bankroll, a strategy that is
+        now ``enabled: false``, or an older strategy version than the code ships. Any
+        other cohort that simply was not re-created this boot (an AI arm whose tier is
+        down, a universe marked unavailable) is left alone, since that can be transient.
+        A sleeve still holding a position is also left alone until it settles, so its
+        P&L completes. Without this, every bankroll or version change left the old
+        cohort on the dashboard as hundreds of "active" sleeves that never trade.
+        """
+        strategies_cfg = (self.settings.strategies.get("strategies", {}) or {})
+        running = set(self._sleeves)
+        retired = 0
+        try:
+            experiments = self.store.list_experiments()
+        except Exception:  # noqa: BLE001
+            return 0
+        for exp in experiments:
+            if exp.experiment_id in running or str(getattr(exp.status, "value", exp.status)) != "PAPER":
+                continue
+            sdef = strategies_cfg.get(exp.strategy_name) or {}
+            reason = None
+            if exp.starting_bankroll != self._bankroll_per_variant:
+                reason = f"bankroll {exp.starting_bankroll} replaced by {self._bankroll_per_variant}"
+            elif sdef and not sdef.get("enabled", True):
+                reason = "strategy disabled in configs/strategies.yaml"
+            elif (
+                exp.strategy_name in self._current_versions
+                and exp.strategy_version != self._current_versions[exp.strategy_name]
+            ):
+                reason = f"version {exp.strategy_version} replaced by {self._current_versions[exp.strategy_name]}"
+            if reason is None:
+                continue
+            try:
+                portfolio = self.store.load_portfolio(exp.experiment_id)
+            except Exception:  # noqa: BLE001
+                continue
+            if portfolio is not None and any(pos.quantity > 0 for pos in portfolio.positions.values()):
+                continue
+            try:
+                self.registry.transition(exp.experiment_id, ExperimentStatus.DISABLED, f"superseded: {reason}")
+                retired += 1
+            except Exception:  # noqa: BLE001 - an illegal transition is simply skipped
+                log.warning("runner.retire_failed", experiment_id=exp.experiment_id, exc_info=True)
+        if retired:
+            log.info("runner.superseded_retired", count=retired)
+        return retired
 
     def _should_record_forecast(self, forecast: Any) -> bool:
         """Throttle per (experiment, market): keep it if time passed or the number moved.

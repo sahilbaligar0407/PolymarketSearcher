@@ -153,3 +153,20 @@ async def test_jev_confirm_trades_only_when_jev_beats_the_price(p: float, trades
     h.feed_timer()  # uses the answer
     assert (len(h.intents) == 1) is trades
     assert jev.calls == 1
+
+
+def test_kelly_bets_more_on_bigger_edges_and_nothing_without_one() -> None:
+    h = StrategyHarness(HoldingsConsensusStrategy, params={"bankroll": "100.00"})
+    s = h.strategy
+    assert s.kelly_quantity(Decimal("0.50"), Decimal("0.50")) == 0
+    small = s.kelly_quantity(Decimal("0.50"), Decimal("0.54"))
+    big = s.kelly_quantity(Decimal("0.50"), Decimal("0.70"))
+    assert 0 < small < big
+    # capped at 4% of the bankroll: $4 at 50c is 8 contracts, however large the edge
+    assert s.kelly_quantity(Decimal("0.50"), Decimal("0.99")) == 8
+
+
+def test_fixed_sizing_scales_with_the_bankroll() -> None:
+    small = StrategyHarness(HoldingsConsensusStrategy, params={"bankroll": "50.00"}).strategy
+    big = StrategyHarness(HoldingsConsensusStrategy, params={"bankroll": "100.00"}).strategy
+    assert big.sensible_quantity(Decimal("0.10")) == 2 * small.sensible_quantity(Decimal("0.10"))

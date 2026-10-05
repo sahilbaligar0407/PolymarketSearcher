@@ -1,7 +1,8 @@
-# Risk limits. These apply to the single real $50 bankroll and, in scaled form, to every
-# virtual $50 paper sleeve.
+# Risk limits. These apply to the single real bankroll and, in scaled form, to every
+# virtual paper sleeve: $100 each from 2026-10-05 (was $50), so every *_pct cap below is
+# a percentage of $100.
 live:
-  initial_capital: "50.00"
+  initial_capital: "100.00"
   leverage: false
   borrowing: false
   martingale: false

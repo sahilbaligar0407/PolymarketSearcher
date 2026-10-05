@@ -398,3 +398,28 @@ live positions, 22 s) found 182 positions held by 3+ of them, but the strongest 
 was 6-9 wallets, the same whales often held *both* sides of a game (hence `net_only`), and
 only 5 of the 182 had an approved Kalshi twin - all game winners. The consensus signal is
 plentiful; what limits copying it on Kalshi is the matcher's approved coverage.
+
+**54. Finding twins needs the whole Kalshi catalogue and a semantic judge.** We only ever
+downloaded the series our universes name: 8.7k of ~114k open Kalshi markets (160 of
+~2.8k politics, 36 of ~5.4k economics), so most Polymarket markets had no possible twin
+in view. All open events with nested markets page through in ~5 s. Candidate search (an
+inverted index on rare words, damped by date distance) finds the twin in its top 8;
+the deterministic validator could only *flag* such pairs. TypeSafe's Jev decides
+instead. Asked "identical / related but not identical / unrelated", it gave every
+hand-labelled true pair >= 0.81 and every false one <= 0.21, including nomination vs
+election and party vs candidate; a bare yes/no gave true pairs only 0.65-0.95. Of the
+deterministic checks only the numeric-threshold veto survived: location, party and
+comparator vetoes rejected real pairs ("Atlanta wins" vs Braves, a Lions -3.5 spread at
+0.92) that Jev already handled. First pass: 400 held markets, ~3,200 judgements, ~70
+approved pairs across elections, nominations, central banks, championships and NFL/MLB
+spreads and totals - versus 5 before.
+
+**55. Sleeves restart at $100, and superseded cohorts now retire themselves.** Each algo
+that graduates will be funded with $100, so paper sleeves and every percentage risk cap
+now use $100 (sizing scales with the bankroll instead of assuming $50). Bankroll is part
+of a sleeve's identity, so this began fresh cohorts. Every past bankroll or version
+change had left the old cohort on the dashboard as hundreds of "active" sleeves that no
+longer ran; the runner now disables a live sleeve at boot when the config explicitly
+replaced it (bankroll, version, or `enabled: false`), leaving any sleeve that still
+holds a position until it settles. Sizing became a tested dimension too: fixed 3% versus
+quarter-Kelly on the estimated probability (capped at 4%).

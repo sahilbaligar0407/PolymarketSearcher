@@ -8,11 +8,12 @@
 # Keep grids small.  Every added dimension is another chance to discover randomness.
 
 meta:
-  bankroll_per_variant: "50.00"
+  # $100 from 2026-10-05: each algo that graduates will be funded with $100.
+  bankroll_per_variant: "100.00"
   # Hard ceiling on total live paper sleeves. The runner refuses to exceed it.
-  # 410 (was 400) for the holdings_* families, which act on a 60 s timer and cost
+  # 420 (was 400) for the holdings_* families, which act on a 60 s timer and cost
   # almost nothing per market event.
-  max_total_variants: 410
+  max_total_variants: 420
   # Recorded in every report so the reader knows how much searching produced a winner.
   record_variant_count: true
 
@@ -290,8 +291,12 @@ strategies:
       max_chase: [0.03, 0.10]
       min_remaining: [0.10, 0.25]
       confirm: [none]
-    variant_limit: 8
+      sizing: [fixed, kelly]
+    variant_limit: 16
 
+  # sizing (edge and confirm): fixed 3% per position, or quarter-Kelly on the estimated
+  # probability (capped at 4%) - how a limited bankroll is spread across opportunities.
+  #
   # holdings_confirm - the edge rule plus a second opinion: a relevant news story, Jev
   #                    (TypeSafe; TYPESAFE_API_KEY) putting the outcome above the price,
   #                    or Jev shown the headlines.
@@ -310,7 +315,8 @@ strategies:
       min_remaining: [0.10]
       confirm: [news, jev, news_jev]
       jev_min_edge: [0.03]
-    variant_limit: 6
+      sizing: [fixed, kelly]
+    variant_limit: 12
 
   # ------------------------------------------------------------------ ensemble
   ensemble:
