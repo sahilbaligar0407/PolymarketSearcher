@@ -23,6 +23,7 @@ data/daemon_status.json
 data/marketlab.pid
 data/openai_spend.json
 data/KILL_SWITCH
+data/STOP_REQUEST
 data/replay/
 # --- PolymarketSearcher (Node collector) ---
 # Claude Code workspace files
