@@ -33,6 +33,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 
+from marketlab.ai.typesafe import build_jev_client
 from marketlab.clock import Clock
 from marketlab.core.broker import Broker
 from marketlab.core.events import (
@@ -59,6 +60,7 @@ from marketlab.logging import get_logger
 from marketlab.matching.book import MatchBook, MatchView
 from marketlab.matching.cross_venue import approved_for_automation
 from marketlab.settings import Settings
+from marketlab.signals.holdings import HoldingsBook
 from marketlab.storage.state import ExperimentStatus, StateStore
 
 log = get_logger(__name__)
@@ -180,6 +182,8 @@ def _event_canonical_id(event: BaseEvent) -> str | None:
 
 #: Strategy families that read ``params["matches"]``.
 MATCH_CONSUMERS = frozenset({"cross_venue", "copy_trader", "copy_basket"})
+#: Strategies driven by the leaderboard holdings snapshot (marketlab.signals.holdings).
+HOLDINGS_CONSUMERS = frozenset({"holdings_blind", "holdings_edge", "holdings_confirm"})
 
 
 class ExperimentRunner:
@@ -216,6 +220,10 @@ class ExperimentRunner:
         #: wallet -> TraderScore for QUALIFIED wallets; one live dict shared by every
         #: copy sleeve and mutated in place on refresh.
         self.qualified_roster: dict[str, float] = {}
+        #: Top-wallet holdings, written by the ingest loop and read by holdings sleeves.
+        self.holdings = HoldingsBook()
+        #: TypeSafe Jev client for the holdings "jev" confirmations; None without a key.
+        self.jev = build_jev_client(settings)
         self._matches_refreshed_at: datetime | None = None
         self.trader_actions_translated = 0
         #: Shared with the broker so BOTH mutate the same Portfolio object.
@@ -313,6 +321,14 @@ class ExperimentRunner:
                     **ai_params,
                     "matches": MatchView(self.match_book, variant.universe, self._universes_for),
                     "roster": self.qualified_roster,
+                }
+            if variant.strategy_name in HOLDINGS_CONSUMERS:
+                ai_params = {
+                    **ai_params,
+                    "holdings": self.holdings,
+                    "matches": MatchView(self.match_book, variant.universe, self._universes_for),
+                    "jev": self.jev,
+                    "evidence": self.ai_stack.evidence if self.ai_stack is not None else None,
                 }
 
             strategy_id = f"{variant.strategy_name}__{variant.universe}__{identity_mod.parameter_hash(variant.params)}"

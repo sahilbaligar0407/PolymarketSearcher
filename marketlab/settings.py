@@ -65,6 +65,13 @@ class Secrets(BaseSettings):
     jev_api_key: str = ""
     jev_model: str = ""
 
+    #: TypeSafe (https://docs.typesafe.ai): hosts the Jev "System One" model behind
+    #: POST /v1/systemone - typed yes/no, choice and score questions with calibrated
+    #: probabilities, ~0.5 s. Not a chat model, so it is its own client
+    #: (marketlab/ai/typesafe.py), separate from the OpenAI-compatible jev_* slot above.
+    typesafe_api_key: str = ""
+    typesafe_model: str = "jev-latest"
+
     live_trading_enabled: str = "NO"
 
     #: SEC rejects any User-Agent lacking a contact email (its bot filter 403s on the
@@ -81,7 +88,7 @@ class Secrets(BaseSettings):
         for name in type(self).model_fields:
             if name in {
                 "marketlab_mode", "local_llm_provider", "kalshi_environment",
-                "openai_model", "openai_daily_budget_usd", "jev_model",
+                "openai_model", "openai_daily_budget_usd", "jev_model", "typesafe_model",
             }:
                 out[name] = str(getattr(self, name))
                 continue

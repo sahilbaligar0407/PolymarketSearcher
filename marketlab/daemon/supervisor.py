@@ -279,6 +279,8 @@ class Supervisor:
 
         self.variants = self._generate_variants()
         self.runner = await self._build_runner()
+        if self.ingest is not None and hasattr(self.runner, "holdings"):
+            self.ingest.holdings_book = self.runner.holdings
 
         recovery = RecoveryService(
             self.clock,

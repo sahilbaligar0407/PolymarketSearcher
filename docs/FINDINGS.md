@@ -384,3 +384,17 @@ with the Wi-Fi down, and the process stayed alive, so the restart loop never fir
 now bounded (8 at a time, 90 s; the settlements loop finishes the rest), and a thread-
 based hang watchdog exits the process when the heartbeat stops for 10 minutes (20 during
 boot), counting its own checks so a sleeping laptop is not mistaken for a hang.
+
+**52. The leaderboard's time periods were never requested.** #11 concluded the official
+board ignores `period` and `metric`. It does - because they are not its parameters. The
+real ones are `timePeriod` (`DAY`/`WEEK`/`MONTH`/`ALL`) and `orderBy` (`PNL`/`VOL`); with
+them the all-time, monthly and weekly top lists genuinely differ (leaders Theo4, 00gringo00
+and BreakTheBank on 2026-10-04). Every "all-time" board stored before this was really
+*today's* board, the API default. Pages hold 50 rows; `offset` pages further.
+
+**53. Copying holdings: agreement is thin and the bottleneck is matching.** The holdings
+snapshot (top 100 of the all-time, month and week boards; 235 distinct wallets, ~4,000
+live positions, 22 s) found 182 positions held by 3+ of them, but the strongest agreement
+was 6-9 wallets, the same whales often held *both* sides of a game (hence `net_only`), and
+only 5 of the 182 had an approved Kalshi twin - all game winners. The consensus signal is
+plentiful; what limits copying it on Kalshi is the matcher's approved coverage.

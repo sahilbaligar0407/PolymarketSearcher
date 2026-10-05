@@ -17,8 +17,14 @@ sweeps combinations:
   categories this module sweeps (``overall, crypto, sports, politics, economics,
   finance, weather, tech``) were all confirmed to return HTTP 200 with genuinely
   different top wallets per category (i.e. filtering really happens).
-* Official endpoint: ``period`` and ``metric`` do **not** appear to change the
-  response - ``period=day``, ``period=week``, ``period=month``, ``period=all`` and
+* **Corrected 2026-10-04:** the official endpoint's time and ranking parameters are
+  ``timePeriod`` (``DAY``/``WEEK``/``MONTH``/``ALL``) and ``orderBy`` (``PNL``/``VOL``).
+  ``period``/``metric`` were never its parameter names, so every call below fell back to
+  the default, *today's* board - that is the whole reason they "did nothing".
+  ``get_official`` now translates ``period``/``metric`` into the real names, pages are
+  capped at 50 rows (``offset`` pages further), and ``get_top`` returns a top-N.
+  The original (mistaken) observation, kept for the record: ``period`` and ``metric`` do
+  **not** appear to change the response - ``period=day``, ``period=week``, ``period=month``, ``period=all`` and
   ``metric=pnl``, ``metric=vol``, ``metric=volume`` were all observed to return the
   identical top-N list (same ranks, same pnl figures) for a fixed category. An invalid
   value for either does not error either - it silently falls back to the same result.
@@ -62,6 +68,10 @@ OFFICIAL_PERIODS: tuple[str, ...] = ("day", "week", "month", "all")
 #: values `snapshot_all` sends so the request is well-formed; they carry no meaning, and
 #: the resulting rows are labelled "ignored" rather than with these values.
 OFFICIAL_CANONICAL_PERIOD = "all"
+#: The official board's real parameter values (see the module docstring).
+_TIME_PERIODS = {"day": "DAY", "week": "WEEK", "month": "MONTH", "all": "ALL"}
+_ORDER_BY = {"pnl": "PNL", "vol": "VOL", "volume": "VOL"}
+OFFICIAL_PAGE_SIZE = 50
 OFFICIAL_CANONICAL_METRIC = "pnl"
 #: Metrics requested; see module docstring - `vol` is only meaningful for `overall`
 #: (and today isn't actually honored either), but we still sweep it for `overall`.
@@ -163,13 +173,38 @@ class LeaderboardAdapter(Adapter):
         return self._official.health()
 
     async def get_official(
-        self, *, category: str = "overall", period: str = "week", metric: str = "pnl", limit: int = 50
+        self,
+        *,
+        category: str = "overall",
+        period: str = "week",
+        metric: str = "pnl",
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
-        data = await self._official.get_json(
-            self._official_path,
-            params={"category": category, "period": period, "metric": metric, "limit": limit},
-        )
+        params = {
+            "category": category.upper(),
+            "timePeriod": _TIME_PERIODS.get(period.lower(), period.upper()),
+            "orderBy": _ORDER_BY.get(metric.lower(), metric.upper()),
+            "limit": min(limit, OFFICIAL_PAGE_SIZE),
+            "offset": offset,
+        }
+        data = await self._official.get_json(self._official_path, params=params)
         return data if isinstance(data, list) else []
+
+    async def get_top(
+        self, *, category: str = "overall", period: str = "all", metric: str = "pnl", n: int = 100
+    ) -> list[dict[str, Any]]:
+        """The top ``n`` of one board, paging 50 at a time."""
+        out: list[dict[str, Any]] = []
+        while len(out) < n:
+            page = await self.get_official(
+                category=category, period=period, metric=metric,
+                limit=min(OFFICIAL_PAGE_SIZE, n - len(out)), offset=len(out),
+            )
+            out.extend(page)
+            if len(page) < OFFICIAL_PAGE_SIZE:
+                break
+        return out[:n]
 
     async def get_legacy_profit(self, *, window: str = "30d", limit: int = 50) -> list[dict[str, Any]]:
         data = await self._legacy.get_json("/profit", params={"window": window, "limit": limit})

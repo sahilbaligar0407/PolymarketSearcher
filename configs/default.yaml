@@ -53,6 +53,10 @@ ingest:
   # ~20k markets are open (mostly sports props); 5000 keeps a poll to ~25 requests.
   poly_us_max_markets: 5000
   poly_leaderboard_refresh_seconds: 3600
+  # Top-wallet holdings for the holdings_* strategies: the top N of the all-time, monthly
+  # and weekly overall boards (<= 3N wallets, ~15 s to fetch at 8 in flight).
+  poly_holdings_refresh_seconds: 900
+  poly_holdings_top_n: 100
   poly_activity_refresh_seconds: 30
   gdelt_refresh_seconds: 900
   sec_refresh_seconds: 300

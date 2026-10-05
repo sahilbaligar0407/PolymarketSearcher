@@ -10,7 +10,9 @@
 meta:
   bankroll_per_variant: "50.00"
   # Hard ceiling on total live paper sleeves. The runner refuses to exceed it.
-  max_total_variants: 400
+  # 410 (was 400) for the holdings_* families, which act on a 60 s timer and cost
+  # almost nothing per market event.
+  max_total_variants: 410
   # Recorded in every report so the reader knows how much searching produced a winner.
   record_variant_count: true
 
@@ -112,7 +114,10 @@ strategies:
 
   # ------------------------------------------------------------------ relative value
   binary_parity:
-    enabled: true
+    # Off 2026-10-04: an offline scan found 0 complementary market pairs in every
+    # universe (Kalshi expresses "not X" as the NO side of the same market), and the
+    # two-team game pairs it misses priced at >= 0.98 combined. 12 sleeves, 0 orders.
+    enabled: false
     evidence: B
     class: marketlab.strategies.binary_parity:BinaryParityStrategy
     universes: [btc_1h, sports_nfl, sports_nba, politics_elections]
@@ -243,6 +248,68 @@ strategies:
       basket_size: [5, 10, 20]
       weighting: [equal, forward_validated]
       follower_delay_seconds: [5, 30]
+    variant_limit: 6
+
+  # ------------------------------------------------------------------ holdings consensus
+  # The operator's manual process, automated (marketlab/strategies/holdings_consensus.py):
+  # the top 100 wallets on the all-time, monthly and weekly overall leaderboards, every
+  # open position they hold, refreshed every 15 min; copy positions many of them share,
+  # on the approved Kalshi twin (so far: game winners, hence sports_games). Three
+  # families ask three questions.
+  #
+  # holdings_blind   - copy at any price. Which board, how many must agree, and does
+  #                    dropping two-sided (hedging) wallets help?
+  holdings_blind:
+    enabled: true
+    evidence: D
+    class: marketlab.strategies.holdings_consensus:HoldingsConsensusStrategy
+    universes: [sports_games]
+    variants:
+      board: [all, month, week, union]
+      top_n: [100]
+      min_holders: [3, 5]
+      net_only: [true, false]
+      entry: [blind]
+      confirm: [none]
+    variant_limit: 16
+
+  # holdings_edge    - copy only while it is still worth it: the price has not run more
+  #                    than max_chase past the holders' average entry, and at least
+  #                    min_remaining of upside is left ("$5 to make $0.50" is refused).
+  holdings_edge:
+    enabled: true
+    evidence: D
+    class: marketlab.strategies.holdings_consensus:HoldingsConsensusStrategy
+    universes: [sports_games]
+    variants:
+      board: [union]
+      top_n: [100]
+      min_holders: [3, 5]
+      net_only: [true]
+      entry: [edge]
+      max_chase: [0.03, 0.10]
+      min_remaining: [0.10, 0.25]
+      confirm: [none]
+    variant_limit: 8
+
+  # holdings_confirm - the edge rule plus a second opinion: a relevant news story, Jev
+  #                    (TypeSafe; TYPESAFE_API_KEY) putting the outcome above the price,
+  #                    or Jev shown the headlines.
+  holdings_confirm:
+    enabled: true
+    evidence: D
+    class: marketlab.strategies.holdings_consensus:HoldingsConsensusStrategy
+    universes: [sports_games]
+    variants:
+      board: [union]
+      top_n: [100]
+      min_holders: [3, 5]
+      net_only: [true]
+      entry: [edge]
+      max_chase: [0.05]
+      min_remaining: [0.10]
+      confirm: [news, jev, news_jev]
+      jev_min_edge: [0.03]
     variant_limit: 6
 
   # ------------------------------------------------------------------ ensemble

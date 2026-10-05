@@ -567,6 +567,8 @@ class IngestService:
         )
         self.poly_us = PolymarketUsAdapter(settings.sources.poly_us_rest, clock)
         self._poly_us_seen: set[str] = set()
+        #: Shared with the runner (set by the supervisor); filled by _loop_poly_holdings.
+        self.holdings_book: Any | None = None
 
         #: name -> why that adapter could not be constructed. Populated by
         #: _build_misc_adapters so `doctor` can report a wiring bug as a bug
@@ -1431,6 +1433,61 @@ class IngestService:
         log.info("ingest_poly_us", markets=len(raw_markets), quoted=len(book_rows), new=len(meta_rows))
         return len(raw_markets)
 
+    async def _ingest_poly_holdings_once(self) -> int:
+        """Snapshot the open positions of the top wallets on the all-time, monthly and
+        weekly overall leaderboards into the shared :class:`HoldingsBook`."""
+        from marketlab.signals.holdings import parse_position
+
+        if self.holdings_book is None:
+            return 0
+        top_n = int(self._cfg.get("poly_holdings_top_n", 100))
+        boards: dict[str, list[str]] = {}
+        for period in ("all", "month", "week"):
+            rows = await self.poly_leaderboard.get_top(category="overall", period=period, n=top_n)
+            boards[period] = [str(r.get("proxyWallet")) for r in rows if r.get("proxyWallet")]
+        wallets = list(dict.fromkeys(w for board in boards.values() for w in board))
+        membership = {w: ",".join(b for b, ws in boards.items() if w in ws) for w in wallets}
+        gate = asyncio.Semaphore(8)
+
+        async def fetch(wallet: str) -> list[Any]:
+            async with gate:
+                try:
+                    raw = await self.poly_data.get_positions(wallet, limit=500, size_threshold=Decimal("1"))
+                except Exception as exc:  # noqa: BLE001 - one wallet must not sink the snapshot
+                    log.warning("poly_holdings_wallet_failed", wallet=wallet, error=str(exc))
+                    return []
+            return [h for h in (parse_position(wallet, r) for r in raw) if h is not None]
+
+        per_wallet = await asyncio.gather(*(fetch(w) for w in wallets))
+        holdings = [h for hs in per_wallet for h in hs]
+        if not holdings:
+            self.health.record_error("poly_data", RuntimeError("holdings snapshot returned no positions"))
+            return 0
+        now = self.clock.now()
+        self.holdings_book.replace(boards, holdings, now)
+        await self._write_parquet("holdings", [
+            {
+                "snapshot_time": now, "wallet": h.wallet, "boards": membership.get(h.wallet, ""),
+                "condition_id": h.condition_id, "outcome_index": h.outcome_index, "outcome": h.outcome,
+                "title": h.title, "size": h.size, "avg_price": h.avg_price, "cur_price": h.cur_price,
+                "usd_value": h.usd_value, "end_date": h.end_date, "date": now.date(),
+            }
+            for h in holdings
+        ])
+        self.health.record_message("poly_data")
+        log.info("ingest_poly_holdings", wallets=len(wallets), positions=len(holdings),
+                 boards={k: len(v) for k, v in boards.items()})
+        return len(holdings)
+
+    async def _loop_poly_holdings(self) -> None:
+        interval = self._seconds("poly_holdings_refresh_seconds", 900)
+        while not self._stop.is_set():
+            try:
+                await self._ingest_poly_holdings_once()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ingest_poly_holdings_failed", error=str(exc))
+            await self.clock.sleep(interval)
+
     async def _loop_poly_us(self) -> None:
         interval = self._seconds("poly_us_refresh_seconds", 300)
         while not self._stop.is_set():
@@ -1724,6 +1781,7 @@ class IngestService:
         "poly_leaderboard": "polymarket_global",
         "poly_activity": "polymarket_global",
         "poly_us": "polymarket_us",
+        "poly_holdings": "polymarket_global",
         "sec": "sec",
         "crypto_spot": "crypto_spot",
         "weather_nws": "weather_nws",
@@ -1761,6 +1819,7 @@ class IngestService:
             ("poly_leaderboard", self._loop_poly_leaderboard),
             ("poly_activity", self._loop_poly_activity),
             ("poly_us", self._loop_poly_us),
+            ("poly_holdings", self._loop_poly_holdings),
             ("sec", self._loop_sec),
             ("crypto_spot", self._loop_crypto_spot),
             ("weather_nws", self._loop_weather),

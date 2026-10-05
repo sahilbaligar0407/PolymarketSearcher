@@ -40,6 +40,7 @@ _DECIMAL_FIELDS: dict[str, tuple[str, ...]] = {
     "external_prices": ("price", "implied_probability"),
     "forecasts": ("p_yes", "confidence", "market_probability"),
     "trader_actions": ("price", "size", "usd_size"),
+    "holdings": ("size", "avg_price", "cur_price", "usd_value"),
 }
 
 
@@ -145,6 +146,22 @@ SCHEMAS: dict[str, pa.Schema] = {
             *_decimal_pair_fields(_DECIMAL_FIELDS["forecasts"]),
             pa.field("abstain", pa.bool_()),
             pa.field("rationale", pa.string()),
+        ]
+    ),
+    # One row per (snapshot, wallet, open position) for the top leaderboard wallets: the
+    # raw material of the holdings-consensus strategies, kept so any consensus rule can be
+    # replayed later against what the wallets actually held at each snapshot.
+    "holdings": pa.schema(
+        [
+            pa.field("snapshot_time", pa.timestamp("us", tz="UTC")),
+            pa.field("wallet", pa.string()),
+            pa.field("boards", pa.string()),
+            pa.field("condition_id", pa.string()),
+            pa.field("outcome_index", pa.int32()),
+            pa.field("outcome", pa.string()),
+            pa.field("title", pa.string()),
+            *_decimal_pair_fields(_DECIMAL_FIELDS["holdings"]),
+            pa.field("end_date", pa.string()),
         ]
     ),
     "trader_actions": pa.schema(

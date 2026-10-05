@@ -152,6 +152,16 @@ universes:
     odds_api_sport: americanfootball_ncaaf
     live_state_required: true
 
+  # Game winners across every league: where the approved Polymarket twins are, and the
+  # one universe the holdings_* strategies need (their signal is global, so a sleeve per
+  # league would just run five identical copies).
+  sports_games:
+    label: Game winners, all leagues
+    category: sports
+    available: true
+    kalshi_series: [KXNFLGAME, KXNBAGAME, KXMLBGAME, KXNHLGAME, KXNCAAFGAME, KXNCAABGAME]
+    live_state_required: true
+
   # ---------------------------------------------------------------- economics
   economics_inflation:
     label: CPI and inflation
