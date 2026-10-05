@@ -498,14 +498,18 @@ class ExperimentRunner:
                 and exp.strategy_version != self._current_versions[exp.strategy_name]
             ):
                 reason = f"version {exp.strategy_version} replaced by {self._current_versions[exp.strategy_name]}"
+            invalidated = exp.strategy_version in set(map(str, sdef.get("invalidated_versions") or ()))
+            if invalidated:
+                reason = f"version {exp.strategy_version} invalidated (configs/strategies.yaml)"
             if reason is None:
                 continue
-            try:
-                portfolio = self.store.load_portfolio(exp.experiment_id)
-            except Exception:  # noqa: BLE001
-                continue
-            if portfolio is not None and any(pos.quantity > 0 for pos in portfolio.positions.values()):
-                continue
+            if not invalidated:
+                try:
+                    portfolio = self.store.load_portfolio(exp.experiment_id)
+                except Exception:  # noqa: BLE001
+                    continue
+                if portfolio is not None and any(pos.quantity > 0 for pos in portfolio.positions.values()):
+                    continue
             try:
                 self.registry.transition(exp.experiment_id, ExperimentStatus.DISABLED, f"superseded: {reason}")
                 retired += 1

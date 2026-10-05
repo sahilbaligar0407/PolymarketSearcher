@@ -100,6 +100,9 @@ strategies:
     enabled: true
     evidence: B
     class: marketlab.strategies.market_maker:AvellanedaStoikovBinaryStrategy
+    # Results from these versions are void: 1.0.0/1.1.0 sold YES they did not hold and the
+    # broker credited the cash (~$970 of phantom P&L, FINDINGS 56). Retired on sight.
+    invalidated_versions: ["1.0.0", "1.1.0"]
     universes: [btc_1h, sports_nba, politics_general]
     # base_spread must beat two taker unwind fees (the strategy's own profitability
     # gate). A 1-contract Kalshi fee is never below 1c and is 2c between ~18c and ~82c,

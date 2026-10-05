@@ -445,8 +445,9 @@ class DashboardData:
         try:
             tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             sleeves = self._sleeves(conn)
-            families = self._families(sleeves)
             active = [s for s in sleeves if s["status"] not in _INACTIVE]
+            # Retired cohorts (superseded or invalidated) must not count toward a family.
+            families = self._families(active)
             traded = [s for s in active if s["trades"] > 0]
             portfolio = {
                 "sleeves": len(active),

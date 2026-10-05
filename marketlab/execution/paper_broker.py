@@ -367,6 +367,21 @@ class PaperBroker(Broker):
                 intent, RejectReason.NO_LIQUIDITY, "unknown market", decision_time, send_time, arrival_time
             )
 
+        # No naked sells. Selling contracts the sleeve does not hold credited their cash
+        # while the position merely floored at zero - free money with no liability -
+        # and inflated market_maker by ~$970 (2026-10-05). On Kalshi, "selling YES" you
+        # do not hold is buying NO at 1 - price; a strategy must express it that way.
+        if intent.action is Action.SELL:
+            held = self._held(intent.experiment_id, intent.canonical_id, intent.side)
+            if intent.quantity > held:
+                return self._reject_new(
+                    intent,
+                    RejectReason.RISK_GATE,
+                    f"sell of {intent.quantity} exceeds the {held} held (no short selling: buy the "
+                    f"other side instead)",
+                    decision_time, send_time, arrival_time,
+                )
+
         # 3. Book as of the simulated arrival time. Never a later one.
         book = self._book_as_of(intent.canonical_id, arrival_time)
         if book is None:
@@ -643,6 +658,15 @@ class PaperBroker(Broker):
         # Never let a fill model over-fill beyond what's actually left on the order.
         requested_qty = sum(q for _, q in new_fills)
         total_qty = min(requested_qty, state.remaining_quantity)
+        # A resting SELL can only fill what is still held: the position may have shrunk
+        # since it was placed (other fills, settlement). Whatever cannot be covered is
+        # cancelled rather than filled from nothing.
+        if order.action is Action.SELL:
+            held = self._held(order.experiment_id, order.canonical_id, order.side)
+            if held <= 0:
+                self._cancel_sync(order_id)
+                return []
+            total_qty = min(total_qty, held)
 
         fills: list[Fill] = []
         remaining_to_build = total_qty
@@ -725,6 +749,27 @@ class PaperBroker(Broker):
         return produced
 
     # -- Broker ABC -----------------------------------------------------------------
+
+    def _held(self, experiment_id: str, canonical_id: str, side: Side) -> int:
+        portfolio = self.portfolio_provider(experiment_id)
+        if portfolio is None:
+            return 0
+        pos = portfolio.positions.get(Portfolio.key(canonical_id, side))
+        return pos.quantity if pos is not None else 0
+
+    def _cancel_sync(self, order_id: str) -> Order | None:
+        order = self._orders.get(order_id)
+        if order is None or order.is_terminal:
+            return order
+        order = order.model_copy(update={"status": OrderStatus.CANCELED})
+        self._orders[order_id] = order
+        self._resting.pop(order_id, None)
+        ids = self._resting_by_market.get(order.canonical_id)
+        if ids:
+            ids.discard(order_id)
+        self.cancel_count += 1
+        self._persist_order(order)
+        return order
 
     async def cancel(self, order_id: str) -> Order | None:
         order = self._orders.get(order_id)

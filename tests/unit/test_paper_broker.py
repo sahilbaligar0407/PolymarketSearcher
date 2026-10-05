@@ -676,3 +676,20 @@ async def test_book_history_is_trimmed_but_point_in_time_lookup_still_works() ->
     newest = TS + timedelta(seconds=1999)
     found = broker._book_as_of("mkt-1", newest - timedelta(milliseconds=500))
     assert found is not None and found.timestamp == newest - timedelta(seconds=1)
+
+
+async def test_selling_more_than_is_held_is_refused_not_paid() -> None:
+    """2026-10-05: an oversized sell credited cash for contracts never held (phantom P&L)."""
+    from marketlab.core.instruments import BookLevel
+    from marketlab.core.orders import OrderStatus
+
+    portfolio = _portfolio(cash=Decimal("100"))
+    book = _book(bids=(BookLevel(price=Decimal("0.40"), size=500),),
+                 asks=(BookLevel(price=Decimal("0.42"), size=500),))
+    broker = _make_broker(
+        clock=SimulatedClock(TS), market_provider=lambda cid: _market(),
+        book_provider=lambda cid: book, portfolio_provider=lambda eid: portfolio,
+    )
+    order = await broker.submit(_intent(action=Action.SELL, quantity=5))
+    assert order.status is OrderStatus.REJECTED and "no short selling" in order.reject_detail
+    assert portfolio.cash == Decimal("100")

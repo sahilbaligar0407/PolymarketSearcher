@@ -76,7 +76,9 @@ class AvellanedaStoikovBinaryStrategy(BaseStrategy):
     """Two-sided (or filtered one-sided) quoting around a bounded-claim reservation price."""
 
     name = "market_maker"
-    version = "1.1.0"  # 1.1.0: tick-grid quotes; resting quotes kept; requote throttle; reject back-off
+    # 1.1.0: tick-grid quotes; resting quotes kept; requote throttle; reject back-off.
+    # 1.2.0: asks are BUY NO (or a sell of YES actually held) - no naked sells.
+    version = "1.2.0"
     evidence_class = "B"
 
     def __init__(
@@ -298,15 +300,25 @@ class AvellanedaStoikovBinaryStrategy(BaseStrategy):
         self._cancel_all(canonical_id)
         quoted_any = False
 
+        # Each quote is placed the way Kalshi can actually fill it. A bid is BUY YES - or,
+        # when holding NO, SELL NO at 1 - bid (the same trade, closing inventory). An ask
+        # is SELL YES only up to the YES held; otherwise BUY NO at 1 - ask, which posts
+        # real collateral. 1.1.0 sold YES it did not hold and was paid for it.
+        held_yes = max(inventory, 0)
+        held_no = max(-inventory, 0)
         if quote_bid:
             bid_edge = self._maker_edge_buy(fair, bid_price, market)
+            if held_no > 0:
+                bid_side, bid_action, bid_qty, bid_limit = Side.NO, Action.SELL, min(quantity, held_no), ONE - bid_price
+            else:
+                bid_side, bid_action, bid_qty, bid_limit = Side.YES, Action.BUY, quantity, bid_price
             intent = self.make_intent(
                 canonical_id=canonical_id,
-                side=Side.YES,
-                action=Action.BUY,
-                quantity=quantity,
+                side=bid_side,
+                action=bid_action,
+                quantity=bid_qty,
                 order_type=OrderType.LIMIT,
-                limit_price=bid_price,
+                limit_price=bid_limit,
                 rationale=(
                     f"AS-binary bid: fair={fair}, reservation={reservation_price}, "
                     f"half_spread={desired_half_spread}, inventory={inventory}, "
@@ -321,13 +333,17 @@ class AvellanedaStoikovBinaryStrategy(BaseStrategy):
 
         if quote_ask:
             ask_edge = self._maker_edge_sell(fair, ask_price, market)
+            if held_yes > 0:
+                ask_side, ask_action, ask_qty, ask_limit = Side.YES, Action.SELL, min(quantity, held_yes), ask_price
+            else:
+                ask_side, ask_action, ask_qty, ask_limit = Side.NO, Action.BUY, quantity, ONE - ask_price
             intent = self.make_intent(
                 canonical_id=canonical_id,
-                side=Side.YES,
-                action=Action.SELL,
-                quantity=quantity,
+                side=ask_side,
+                action=ask_action,
+                quantity=ask_qty,
                 order_type=OrderType.LIMIT,
-                limit_price=ask_price,
+                limit_price=ask_limit,
                 rationale=(
                     f"AS-binary ask: fair={fair}, reservation={reservation_price}, "
                     f"half_spread={desired_half_spread}, inventory={inventory}, "

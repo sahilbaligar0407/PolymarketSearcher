@@ -30,16 +30,27 @@ def _open_order(order_id: str, canonical_id: str, now) -> Order:
     )
 
 
+def _quote(intents, side: str):  # noqa: ANN001, ANN202
+    """The bid/ask quote, whichever contract it is placed on (an ask is usually BUY NO)."""
+    return next(i for i in intents if i.features["quote_side"] == side)
+
+
+def _yes_price(intent) -> Decimal:  # noqa: ANN001
+    return Decimal(str(intent.features[f"{intent.features['quote_side']}_price"]))
+
+
 def test_quotes_straddle_the_reservation_price() -> None:
     h = StrategyHarness(AvellanedaStoikovBinaryStrategy, params={"base_spread": "0.05", "mode": "two_sided"})
     h.set_market(make_market("M1"))
     h.feed_book(make_book("M1", [("0.49", 100)], [("0.51", 100)], h.now()))
 
     assert len(h.intents) == 2
-    bid = next(i for i in h.intents if i.action is Action.BUY)
-    ask = next(i for i in h.intents if i.action is Action.SELL)
+    bid, ask = _quote(h.intents, "bid"), _quote(h.intents, "ask")
     reservation = Decimal(str(bid.features["reservation_price"]))
-    assert bid.limit_price < reservation < ask.limit_price
+    assert _yes_price(bid) < reservation < _yes_price(ask)
+    # Flat, the ask is placed as BUY NO at 1 - ask: collateralised, never a naked sell.
+    assert (ask.side, ask.action) == (Side.NO, Action.BUY)
+    assert ask.limit_price == 1 - _yes_price(ask)
     assert bid.expected_edge is not None and bid.expected_edge > 0
     assert ask.expected_edge is not None and ask.expected_edge > 0
 
@@ -48,8 +59,8 @@ def test_inventory_skews_quotes_in_the_correct_direction() -> None:
     flat = StrategyHarness(AvellanedaStoikovBinaryStrategy, params={"base_spread": "0.05", "mode": "two_sided"})
     flat.set_market(make_market("M1"))
     flat.feed_book(make_book("M1", [("0.49", 100)], [("0.51", 100)], flat.now()))
-    flat_bid = next(i for i in flat.intents if i.action is Action.BUY).limit_price
-    flat_ask = next(i for i in flat.intents if i.action is Action.SELL).limit_price
+    flat_bid = _yes_price(_quote(flat.intents, "bid"))
+    flat_ask = _yes_price(_quote(flat.intents, "ask"))
 
     long_yes = StrategyHarness(AvellanedaStoikovBinaryStrategy, params={"base_spread": "0.05", "mode": "two_sided"})
     long_yes.set_market(make_market("M1"))
@@ -65,8 +76,11 @@ def test_inventory_skews_quotes_in_the_correct_direction() -> None:
     )
     long_yes.feed_fill(fill)
     long_yes.feed_book(make_book("M1", [("0.49", 100)], [("0.51", 100)], long_yes.now()))
-    skewed_bid = next(i for i in long_yes.intents if i.action is Action.BUY).limit_price
-    skewed_ask = next(i for i in long_yes.intents if i.action is Action.SELL).limit_price
+    skewed_bid = _yes_price(_quote(long_yes.intents, "bid"))
+    ask = _quote(long_yes.intents, "ask")
+    skewed_ask = _yes_price(ask)
+    # Holding YES, the ask sells it (never more than is held).
+    assert (ask.side, ask.action) == (Side.YES, Action.SELL) and ask.quantity <= 10
 
     # Long YES inventory should pull both quotes DOWN: less eager to buy more, more eager
     # to sell down the existing position.

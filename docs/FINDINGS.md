@@ -423,3 +423,15 @@ longer ran; the runner now disables a live sleeve at boot when the config explic
 replaced it (bankroll, version, or `enabled: false`), leaving any sleeve that still
 holds a position until it settles. Sizing became a tested dimension too: fixed 3% versus
 quarter-Kelly on the estimated probability (capped at 4%).
+
+**56. The market maker's best-in-tournament P&L was phantom cash.** Selling more contracts
+than a sleeve held credited the cash for all of them while the position simply floored
+at zero: free money, no liability. The market maker's asks were SELL YES orders placed
+while flat, so every filled ask minted cash. Of the family's $1,187 (in ~3 hours on $50
+sleeves) $971 came from 2,997 such contracts; six "different" parameter sets showed the
+identical +$89.34 because they shared the same fills. No other strategy ever oversold.
+The broker now refuses a sell larger than the position and caps a resting sell at what
+is still held; the market maker (1.2.0) places its ask as BUY NO at 1 - ask, collateralised
+the way Kalshi fills it. Versions 1.0.0 and 1.1.0 are marked invalidated and their
+sleeves retire on sight, positions or not. A result that good, that fast, deserved an
+audit before a celebration.
