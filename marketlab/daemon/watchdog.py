@@ -26,13 +26,25 @@ log = get_logger(__name__)
 HANG_EXIT_CODE = 75
 
 
+def hard_exit(code: int) -> None:
+    """End the process now. On Windows ``os._exit`` (ExitProcess) can deadlock on loader
+    locks held by other threads - it did on 2026-10-05, leaving a hung daemon alive for
+    40+ minutes after the watchdog fired - so use TerminateProcess, which cannot block."""
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.TerminateProcess(kernel32.GetCurrentProcess(), code)
+    os._exit(code)
+
+
 class HangWatchdog(threading.Thread):
     def __init__(
         self,
         limit_seconds: float,
         *,
         check_seconds: float = 30.0,
-        exit_fn=os._exit,  # noqa: ANN001 - injectable for tests
+        exit_fn=None,  # noqa: ANN001 - injectable for tests
     ) -> None:
         super().__init__(name="marketlab-hang-watchdog", daemon=True)
         self._check = check_seconds
@@ -40,7 +52,7 @@ class HangWatchdog(threading.Thread):
         self._missed = 0
         self._allowed = self._checks_for(limit_seconds)
         self._stage = "boot"
-        self._exit = exit_fn
+        self._exit = exit_fn or hard_exit
         self._stopped = threading.Event()
 
     def _checks_for(self, seconds: float) -> int:

@@ -77,6 +77,11 @@ class CrossVenueRelativeValueStrategy(BaseStrategy):
 
     def on_timer(self, event: TimerEvent) -> None:
         del event
+        # A full sweep of every approved pair, at most every few seconds: the 1 s tick
+        # times ~30 sleeves times hundreds of discovered pairs is CPU the loop cannot spare.
+        if self.on_cooldown("__sweep__", float(self.param("sweep_seconds", 5.0))):
+            return
+        self.mark_fired("__sweep__")
         for match in self.param("matches", ()) or ():
             self._evaluate_match(match)
 

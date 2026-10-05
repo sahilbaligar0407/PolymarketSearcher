@@ -21,6 +21,8 @@ class MatchBook:
     def __init__(self) -> None:
         self._by_kalshi: dict[str, Any] = {}
         self._by_poly: dict[str, Any] = {}
+        #: Bumped on every replace(), so views can cache their filtered lists.
+        self.version = 0
 
     def replace(self, matches: list[Any]) -> None:
         by_kalshi: dict[str, Any] = {}
@@ -33,6 +35,7 @@ class MatchBook:
                 if prev is None or m.match_confidence > prev.match_confidence:
                     index[key] = m
         self._by_kalshi, self._by_poly = by_kalshi, by_poly
+        self.version += 1
 
     def for_poly(self, poly_canonical_id: str) -> Any | None:
         return self._by_poly.get(poly_canonical_id)
@@ -61,6 +64,8 @@ class MatchView:
         self._book = book
         self._universe = universe
         self._universes_for = universes_for
+        self._cached_version = -1
+        self._cached: list[Any] = []
 
     def _in_universe(self, match: Any) -> bool:
         try:
@@ -68,14 +73,23 @@ class MatchView:
         except Exception:  # noqa: BLE001 - an unroutable market is simply out of scope
             return False
 
+    def _members(self) -> list[Any]:
+        # cross_venue iterates this on every 1 s tick, in ~30 sleeves. Recomputing each
+        # match's universes every time starved the event loop once discovery grew the
+        # book (2026-10-05: the daemon hung for 40+ min). Recompute only on a new book.
+        if self._cached_version != self._book.version:
+            self._cached = [m for m in self._book.all() if self._in_universe(m)]
+            self._cached_version = self._book.version
+        return self._cached
+
     def __iter__(self) -> Iterator[Any]:
-        return (m for m in self._book.all() if self._in_universe(m))
+        return iter(self._members())
 
     def __len__(self) -> int:
-        return sum(1 for _ in self)
+        return len(self._members())
 
     def __bool__(self) -> bool:
-        return any(True for _ in self)
+        return bool(self._members())
 
     def get(self, key: str, default: Any = None) -> Any:
         if not key:
